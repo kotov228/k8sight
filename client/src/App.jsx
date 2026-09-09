@@ -12,6 +12,7 @@ import CustomResourceDetail from './components/CustomResourceDetail';
 import Topology from './components/Topology';
 import AzureIntegration from './components/AzureIntegration';
 import AwsIntegration from './components/AwsIntegration';
+import GkeIntegration from './components/GkeIntegration';
 import Loader from './components/Loader';
 import Namespaces from './components/Namespaces';
 import KubeConfigModal from './components/KubeConfigModal';
@@ -107,6 +108,7 @@ function App() {
   const [azureMode, setAzureMode] = useState(null); // null | 'az'
   const openAzure = (mode) => { setAzureMode(mode === 'az' ? 'az' : null); setShowAzure(true); };
   const [showAws, setShowAws] = useState(false);
+  const [showGke, setShowGke] = useState(false);
   const [prefSection, setPrefSection] = useState('general');
   const [prefReturn, setPrefReturn] = useState('overview');
   const [agentOpen, setAgentOpen] = useState(false);
@@ -508,6 +510,7 @@ function App() {
           onSwitchContext={switchContext}
           onAddAzure={(mode) => openAzure(mode)}
           onAddAws={() => setShowAws(true)}
+          onAddGke={() => setShowGke(true)}
           onDemo={startDemo}
         />
       )}
@@ -539,6 +542,13 @@ function App() {
         />
       )}
 
+      {showGke && (
+        <GkeIntegration
+          onClose={() => setShowGke(false)}
+          onImported={async () => { await fetchConfigStatus(); retryAuth(); }}
+        />
+      )}
+
 
       {authOk ? (
         <div className="layout-main">
@@ -564,6 +574,7 @@ function App() {
             onSelectSecurityView={(v) => { setSecurityView(v); setResourceType('security'); }}
             onAddAzure={() => openAzure()}
             onAddAws={() => setShowAws(true)}
+            onAddGke={() => setShowGke(true)}
             onAddLocal={() => setForceConfigModal(true)}
             onOpenPreferences={() => openPreferences('general')}
           />
@@ -604,6 +615,7 @@ function App() {
               onChangeConfig={() => setForceConfigModal(true)}
               onAddAzure={() => openAzure()}
               onAddAws={() => setShowAws(true)}
+              onAddGke={() => setShowGke(true)}
               initialSection={prefSection}
               onClose={() => setResourceType(prefReturn || 'overview')}
             />
