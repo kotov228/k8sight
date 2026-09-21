@@ -192,6 +192,19 @@
   .callout p { margin: 0; font-size: 15px; color: var(--text-dim); }
   .callout strong { color: var(--text); }
 
+  /* Comparison table */
+  .cmp-wrap { overflow-x: auto; margin: 0 0 20px; border: 1px solid var(--border); border-radius: 12px; }
+  table.cmp { width: 100%; border-collapse: collapse; font-size: 14.5px; min-width: 560px; }
+  table.cmp th, table.cmp td { padding: 11px 14px; text-align: center; border-bottom: 1px solid var(--border); }
+  table.cmp tr:last-child td { border-bottom: 0; }
+  table.cmp thead th { font-weight: 600; color: var(--text); background: var(--bg-2); }
+  table.cmp thead th.pick { color: var(--accent); }
+  table.cmp tbody th { text-align: left; font-weight: 500; color: var(--text-dim); white-space: nowrap; }
+  table.cmp td.yes { color: var(--green); font-weight: 600; }
+  table.cmp td.no { color: var(--text-dim); }
+  table.cmp td small { display: block; font-size: 12px; font-weight: 400; color: var(--text-dim); }
+  table.cmp col.pick, table.cmp td.pickcol { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+
   .method-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 0 0 18px; }
   .method { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
   .method h4 { font-size: 15px; font-weight: 600; color: var(--text); margin: 0 0 5px; }
@@ -297,6 +310,7 @@
     </nav>
     <div class="side-group">Reference</div>
     <nav>
+      <a href="#compare" data-sect>How it compares</a>
       <a href="#security" data-sect>Security</a>
       <a href="#config" data-sect>Configuration</a>
       <a href="#troubleshooting" data-sect>Troubleshooting</a>
@@ -713,6 +727,37 @@ export GOOGLE_CLIENT_SECRET='GOCSPX-...'</code></pre>
       <p>Add it to Claude Code:</p>
       <pre><code>claude mcp add --transport http k8sight http://localhost:3001/mcp</code></pre>
       <p><strong>Read tools are always available; write/destructive tools are off by default</strong> — enable them with <code>MCP_ALLOW_WRITE=1</code> (or the Preferences toggle) only when you want an agent to be able to mutate the cluster.</p>
+    </article>
+
+    <!-- ============ Security ============ -->
+    <article id="compare">
+      <h2>How it compares</h2>
+      <div class="tagline">Where k8sight fits next to Rancher, Lens and k9s.</div>
+      <p>k8sight is a <strong>desktop UI for clusters you already have</strong> — closest in spirit to <strong>Lens</strong> and <strong>k9s</strong>, not to a management <em>platform</em> like <strong>Rancher</strong>. Rancher runs <em>inside</em> your clusters to provision and govern a whole fleet for a team; k8sight runs on your laptop, reads your kubeconfig, and needs nothing installed in-cluster.</p>
+      <div class="cmp-wrap">
+        <table class="cmp">
+          <colgroup><col><col class="pick"><col><col></colgroup>
+          <thead>
+            <tr><th></th><th class="pick" scope="col">k8sight</th><th scope="col">Rancher</th><th scope="col">Lens / k9s</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Category</th><td class="pickcol">Native desktop UI</td><td>Multi-cluster platform</td><td>Desktop / terminal UI</td></tr>
+            <tr><th scope="row">Setup</th><td class="pickcol">Download &amp; run</td><td>Deploy in-cluster</td><td>Download &amp; run</td></tr>
+            <tr><th scope="row">Runs where</th><td class="pickcol">Your laptop</td><td>In a cluster</td><td>Laptop / terminal</td></tr>
+            <tr><th scope="row">Cluster lifecycle (provision, upgrade)</th><td class="pickcol no">—</td><td class="yes">✓</td><td class="no">—</td></tr>
+            <tr><th scope="row">Centralized team RBAC &amp; multi-tenancy</th><td class="pickcol no">—</td><td class="yes">✓</td><td class="no">—</td></tr>
+            <tr><th scope="row">Built-in security scan (CVEs, config, RBAC)</th><td class="pickcol yes">✓<small>bundled Trivy</small></td><td>via add-ons</td><td class="no">—</td></tr>
+            <tr><th scope="row">AI assistant + MCP server</th><td class="pickcol yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+            <tr><th scope="row">Try with no cluster (demo mode)</th><td class="pickcol yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+            <tr><th scope="row">One-click EKS/AKS onboarding (no CLI)</th><td class="pickcol yes">✓</td><td class="yes">✓</td><td class="no">—</td></tr>
+            <tr><th scope="row">Free &amp; open-source</th><td class="pickcol yes">✓</td><td class="yes">✓</td><td>k9s ✓ · Lens: sign-in</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout tip">
+        <span class="cico"><svg aria-hidden="true" focusable="false" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></span>
+        <p>Reach for <strong>Rancher</strong> to provision and govern a fleet of clusters for a team. Reach for <strong>k8sight</strong> as a fast local cockpit for clusters you already have — dashboards, logs, shell, topology, security scans and an AI assistant, with nothing to deploy. They coexist happily.</p>
+      </div>
     </article>
 
     <!-- ============ Security ============ -->

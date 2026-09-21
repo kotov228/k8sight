@@ -53,6 +53,26 @@ A native desktop app (macOS · Windows · Linux) — and a Docker image — for 
 - Docked coding agents — detects Claude Code, GitHub Copilot CLI, Gemini CLI, Codex and opencode on your `PATH`.
 - Doubles as an [MCP](https://modelcontextprotocol.io) server so external agents can inspect the cluster ([details](#connect-ai-agents-mcp)).
 
+## How k8sight compares
+
+k8sight is a **desktop UI for clusters you already have** — closest in spirit to **Lens** and **k9s**, not to a management *platform* like **Rancher**. Rancher runs *inside* your clusters to provision and govern a whole fleet for a team; k8sight runs on your laptop, reads your kubeconfig, and needs nothing installed in-cluster.
+
+| | **k8sight** | **Rancher** | **Lens / k9s** |
+|---|:---:|:---:|:---:|
+| Category | Native desktop UI | Multi-cluster platform (server) | Desktop UI / terminal UI |
+| Setup | Download & run | Deploy & operate in-cluster | Download & run |
+| Runs where | Your laptop | In a cluster | Your laptop / terminal |
+| Cluster lifecycle (provision, upgrade) | — | ✅ | — |
+| Centralized team RBAC & multi-tenancy | — | ✅ | — |
+| Built-in security scan (image CVEs, config, RBAC) | ✅ *bundled Trivy* | via add-ons | — |
+| AI assistant + MCP server | ✅ | — | — |
+| Try with no cluster (demo mode) | ✅ | — | — |
+| One-click EKS/AKS onboarding (no CLI) | ✅ | ✅ | — |
+| Free & open-source | ✅ | ✅ | k9s ✅ · Lens: sign-in required |
+
+> [!NOTE]
+> Reach for **Rancher** to provision and govern a fleet of clusters for a team. Reach for **k8sight** as a fast local cockpit for clusters you already have — dashboards, logs, shell, topology, security scans and an AI assistant, with nothing to deploy. They coexist happily.
+
 ## Quick start
 
 > [!TIP]
