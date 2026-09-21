@@ -97,7 +97,7 @@ npm run dist        # builds the UI and packages for the current OS → release/
 | Linux | `k8sight-linux.AppImage` and `k8sight-linux.deb` |
 
 > [!IMPORTANT]
-> Builds are unsigned / ad-hoc signed (no paid certificate). On another Mac, right-click → **Open** (or `xattr -dr com.apple.quarantine "/Applications/k8sight.app"`); on Windows, SmartScreen → **More info → Run anyway**.
+> Builds are currently unsigned / ad-hoc signed (no paid certificate yet). Signed, notarized macOS builds are in the works — Apple Developer account verification is underway and should land in an upcoming release. Until then, on another Mac: right-click → **Open** (or `xattr -dr com.apple.quarantine "/Applications/k8sight.app"`); on Windows: SmartScreen → **More info → Run anyway**.
 
 ### Docker
 
