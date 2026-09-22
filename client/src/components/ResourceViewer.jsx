@@ -73,7 +73,8 @@ export default function ResourceViewer({
   totalCount,
   onResourceTypeChange,
   onNavigate,
-  onRefresh
+  onRefresh,
+  refreshSignal = 0
 }) {
   const toast = useToast();
   const [actionModal, setActionModal] = useState(null); // { type, resource, replicas, busy }
@@ -447,7 +448,7 @@ export default function ResourceViewer({
 
       <div className="resource-table-wrapper">
         {resourceType === 'events' ? (
-          <Events namespace={namespace} />
+          <Events namespace={namespace} refreshSignal={refreshSignal} />
         ) : loading ? (
           <Loader label={`Loading ${RESOURCE_LABELS[resourceType]?.label || 'resources'}…`} />
         ) : resources.length === 0 ? (
@@ -586,6 +587,7 @@ export default function ResourceViewer({
           canScale={SCALABLE.has(resourceType)}
           canRestart={RESTARTABLE.has(resourceType)}
           onAction={(type) => setActionModal({ type, resource: selectedResource, replicas: selectedResource.replicas ?? 1 })}
+          refreshSignal={refreshSignal}
         />
       )}
 
