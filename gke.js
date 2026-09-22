@@ -18,6 +18,23 @@ export const GKE_TOKEN_HELPER = path.join(__dirname, 'gke-token.js');
 
 const CONFIG_DIR = path.join(process.env.HOME || os.homedir(), '.config', 'k8s-manager', 'gke');
 const CREDS_FILE = path.join(CONFIG_DIR, 'credentials.json');
+
+// Google's Application Default Credentials, written by
+// `gcloud auth application-default login`. It carries the same shape this
+// module already stores after a browser sign-in — type: authorized_user with a
+// refresh token — so discoverClusters() and gke-token.js consume it unchanged.
+// Reading it is the GCP equivalent of what eks-token.js does with ~/.aws:
+// reuse what the user already has rather than ask them to create anything.
+const ADC_FILE = path.join(process.env.HOME || os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
+
+function readAdc() {
+  try {
+    const c = JSON.parse(fs.readFileSync(ADC_FILE, 'utf8'));
+    if (c?.type === 'authorized_user' && c.refresh_token && c.client_id && c.client_secret) return c;
+  } catch { /* no ADC on this machine */ }
+  return null;
+}
+
 const kubeconfigPath = () => process.env.KUBECONFIG || path.join(process.env.HOME || os.homedir(), '.kube', 'config');
 
 const OAUTH_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
@@ -46,18 +63,39 @@ function saveCreds(obj) {
   fs.writeFileSync(CREDS_FILE, JSON.stringify(obj, null, 2), { mode: 0o600 });
   return CREDS_FILE;
 }
-export function readCreds() {
+// Credentials this module stored itself, ignoring the ADC fallback.
+function readOwnCreds() {
   try { return JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8')); } catch { return null; }
 }
+
+export function readCreds() {
+  return readOwnCreds() || readAdc();
+}
+
+// Which credentials file the kubeconfig's exec entry must point at. An import
+// made on the ADC has to keep working after the app closes, so the entry must
+// reference the ADC path rather than a file we never wrote.
+export function activeCredsFile() {
+  return readOwnCreds() ? CREDS_FILE : (readAdc() ? ADC_FILE : CREDS_FILE);
+}
+
+// Only removes what this module stored. The ADC belongs to gcloud, not to us —
+// revoking it is `gcloud auth application-default revoke`.
 export function signOut() { try { fs.rmSync(CREDS_FILE); } catch { /* ignore */ } }
+
 export function getStatus() {
-  const c = readCreds();
+  const own = readOwnCreds();
+  const adc = own ? null : readAdc();
+  const c = own || adc;
   return {
     installed: true, // REST-based — always available
     loggedIn: !!c,
-    method: c?.type === 'service_account' ? 'key' : c?.type === 'authorized_user' ? 'browser' : null,
-    account: c?.client_email || null,
+    method: own?.type === 'service_account' ? 'key'
+      : own?.type === 'authorized_user' ? 'browser'
+      : adc ? 'adc' : null,
+    account: c?.client_email || c?.account || null,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
+    adcAvailable: !!readAdc(),
   };
 }
 
@@ -211,7 +249,7 @@ export function writeCluster({ name, location, project, endpoint, ca, alias }) {
       exec: {
         apiVersion: 'client.authentication.k8s.io/v1beta1',
         command: process.execPath, // node / electron-as-node
-        args: [GKE_TOKEN_HELPER, '--credentials', CREDS_FILE],
+        args: [GKE_TOKEN_HELPER, '--credentials', activeCredsFile()],
         interactiveMode: 'Never',
         provideClusterInfo: false,
       },

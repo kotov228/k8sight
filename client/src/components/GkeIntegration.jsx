@@ -11,6 +11,8 @@ const keyOf = (c) => `${c.project}/${c.location}/${c.name}`;
 export default function GkeIntegration({ onClose, onImported }) {
   const [phase, setPhase] = useState('checking'); // checking | choose | key | browser | listing | list | importing | done
   const [oauthConfigured, setOauth] = useState(false);
+  const [adcAvailable, setAdcAvailable] = useState(false);
+  const [adcAccount, setAdcAccount] = useState(null);
   const [keyText, setKeyText] = useState('');
   const [clusters, setClusters] = useState([]);
   const [sel, setSel] = useState(() => new Set());
@@ -26,6 +28,8 @@ export default function GkeIntegration({ onClose, onImported }) {
     try {
       const { data } = await axios.get('/api/gke/status');
       setOauth(!!data.oauthConfigured);
+      setAdcAvailable(!!data.adcAvailable);
+      setAdcAccount(data.account || null);
       if (data.loggedIn) return listClusters();
       setPhase('choose');
     } catch (e) { setError(e.response?.data?.error || e.message); setPhase('choose'); }
@@ -105,8 +109,16 @@ export default function GkeIntegration({ onClose, onImported }) {
           <div className="azure-center azure-msg">
             <Icon name="gcp" size={28} />
             <p>Sign in to Google Cloud to discover the GKE clusters you can access.</p>
-            {oauthConfigured && <button className="action-modal-btn primary" onClick={startBrowser}>Sign in with browser</button>}
-            <button className={`action-modal-btn ${oauthConfigured ? '' : 'primary'}`} onClick={() => setPhase('key')}>Use a service-account key</button>
+            {adcAvailable && (
+              <>
+                <button className="action-modal-btn primary" onClick={listClusters}>Use your gcloud credentials</button>
+                <p className="azure-dim" style={{ marginTop: -4 }}>
+                  {adcAccount ? `Signed in as ${adcAccount} via gcloud` : 'Detected gcloud credentials on this machine'} — no setup needed
+                </p>
+              </>
+            )}
+            {oauthConfigured && <button className={`action-modal-btn ${adcAvailable ? '' : 'primary'}`} onClick={startBrowser}>Sign in with browser</button>}
+            <button className={`action-modal-btn ${oauthConfigured || adcAvailable ? '' : 'primary'}`} onClick={() => setPhase('key')}>Use a service-account key</button>
             <p className="azure-dim" style={{ marginTop: 8 }}>
               {oauthConfigured
                 ? 'Browser sign-in uses your Google account. A service-account key works without an OAuth client.'
