@@ -8,10 +8,30 @@
 // Usage: node gke-token.js --credentials /path/to/credentials.json
 import fs from 'fs';
 import crypto from 'crypto';
+import path from 'path';
+import os from 'os';
 
 const argv = process.argv.slice(2);
 const arg = (n) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
 const b64url = (b) => Buffer.from(b).toString('base64url');
+
+const ADC = path.join(process.env.HOME || os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
+
+// Signing out of the app deletes the credentials file this entry points at but
+// leaves the kubeconfig entry behind, which would break kubectl for every
+// cluster the app ever imported. Fall back to gcloud's Application Default
+// Credentials when they exist: losing the app's session must not cost the user
+// access they still legitimately have.
+function loadCredentials(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    if (file !== ADC) {
+      try { return JSON.parse(fs.readFileSync(ADC, 'utf8')); } catch { /* no ADC either */ }
+    }
+    throw new Error(`no usable credentials at ${file}${file === ADC ? '' : ', and no gcloud ADC to fall back on'}`);
+  }
+}
 
 async function serviceAccountToken(key) {
   const now = Math.floor(Date.now() / 1000);
@@ -42,7 +62,7 @@ async function refreshTokenGrant(c) {
 async function main() {
   const p = arg('credentials');
   if (!p) throw new Error('--credentials <path> is required');
-  const creds = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const creds = loadCredentials(p);
   const token = creds.type === 'service_account' ? await serviceAccountToken(creds) : await refreshTokenGrant(creds);
   // Google access tokens last ~1h; report a slightly shorter expiry so clients refresh in time.
   const expirationTimestamp = new Date(Date.now() + 55 * 60 * 1000).toISOString();
