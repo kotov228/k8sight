@@ -341,9 +341,13 @@ app.get('/api/gke/clusters', async (req, res) => {
 app.post('/api/gke/import', async (req, res) => {
   const { clusters = [] } = req.body || {};
   if (!Array.isArray(clusters) || clusters.length === 0) return res.status(400).json({ error: 'No clusters selected' });
-  const imported = [], failed = [];
+  const imported = [], failed = [], replaced = [];
   for (const c of clusters) {
-    try { gke.writeCluster(c); imported.push(c.name); }
+    try {
+      const { context, replacedExternalAuth } = gke.writeCluster(c);
+      imported.push(c.name);
+      if (replacedExternalAuth) replaced.push(context);
+    }
     catch (e) { failed.push({ name: c?.name || '?', error: firstLine(e.message) }); }
   }
   const prev = currentContext;
@@ -351,7 +355,7 @@ app.post('/api/gke/import', async (req, res) => {
   if (fs.existsSync(p)) loadKubeConfig(p);
   if (prev && kubeConfig?.contexts.some((c) => c.name === prev)) { kubeConfig.setCurrentContext(prev); currentContext = prev; }
   cache.clear();
-  res.json({ imported, failed, contexts: kubeConfig?.contexts.map((c) => c.name) || [], currentContext });
+  res.json({ imported, failed, replaced, contexts: kubeConfig?.contexts.map((c) => c.name) || [], currentContext });
 });
 
 app.get('/api/config/status', (req, res) => {

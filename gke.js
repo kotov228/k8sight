@@ -234,7 +234,14 @@ function loadKube() {
   doc.clusters = doc.clusters || []; doc.users = doc.users || []; doc.contexts = doc.contexts || [];
   return { p, doc };
 }
-function upsert(arr, name, entry) { const i = arr.findIndex((x) => x.name === name); if (i >= 0) arr[i] = entry; else arr.push(entry); }
+// Returns the entry that was replaced, if any, so callers can tell an
+// overwrite from a fresh addition.
+function upsert(arr, name, entry) {
+  const i = arr.findIndex((x) => x.name === name);
+  const previous = i >= 0 ? arr[i] : null;
+  if (i >= 0) arr[i] = entry; else arr.push(entry);
+  return previous;
+}
 
 // Merge one GKE cluster into the kubeconfig. Auth is delegated to gke-token.js,
 // which reads the stored credentials and mints a fresh access token each call.
@@ -243,7 +250,7 @@ export function writeCluster({ name, location, project, endpoint, ca, alias }) {
   const ctxName = alias || `gke_${project}_${location}_${name}`;
   const { p, doc } = loadKube();
   upsert(doc.clusters, ctxName, { name: ctxName, cluster: { server: `https://${endpoint}`, 'certificate-authority-data': ca } });
-  upsert(doc.users, ctxName, {
+  const previousUser = upsert(doc.users, ctxName, {
     name: ctxName,
     user: {
       exec: {
@@ -258,5 +265,10 @@ export function writeCluster({ name, location, project, endpoint, ca, alias }) {
   upsert(doc.contexts, ctxName, { name: ctxName, context: { cluster: ctxName, user: ctxName } });
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, yaml.dump(doc), 'utf8');
-  return ctxName;
+  // gcloud names its entries exactly as we do, so an import can replace the
+  // auth of a context the user already relies on. An entry we wrote ourselves
+  // is not worth reporting; anybody else's is.
+  const replacedExternalAuth = !!previousUser?.user?.exec
+    && !(previousUser.user.exec.args || []).some((a) => String(a).endsWith('gke-token.js'));
+  return { context: ctxName, replacedExternalAuth };
 }

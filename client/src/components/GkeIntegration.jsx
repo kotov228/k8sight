@@ -203,6 +203,11 @@ export default function GkeIntegration({ onClose, onImported }) {
             {result?.failed?.length > 0 && (
               <div className="azure-failed">{result.failed.map((f) => <div key={f.name}><b>{f.name}</b>: {f.error}</div>)}</div>
             )}
+            {result?.replaced?.length > 0 && (
+              <div className="azure-warn">
+                <b>{result.replaced.length}</b> context{result.replaced.length === 1 ? '' : 's'} already existed and now authenticate{result.replaced.length === 1 ? 's' : ''} through k8sight.
+              </div>
+            )}
             <p className="azure-dim">They're now available in the context selector.</p>
             <button className="action-modal-btn primary" onClick={onClose}>Done</button>
           </div>

@@ -64,7 +64,7 @@ test.after(() => {
 // writes matching clusters/users/contexts entries pointing at the endpoint.
 test('writeCluster names the context gke_<project>_<location>_<name> and writes matching entries', async () => {
   const { mod, kubeconfigPath } = await freshGke();
-  const ctxName = mod.writeCluster({
+  const { context: ctxName } = mod.writeCluster({
     name: 'my-cluster', location: 'us-central1', project: 'my-project',
     endpoint: '1.2.3.4', ca: 'ZmFrZS1jYQ==',
   });
@@ -149,13 +149,45 @@ test('an ADC-based import still invokes no Google CLI', async () => {
 // Rule 4: an alias overrides the generated context name.
 test('an alias overrides the generated context name', async () => {
   const { mod, kubeconfigPath } = await freshGke();
-  const ctxName = mod.writeCluster({
+  const { context: ctxName } = mod.writeCluster({
     name: 'c', location: 'l', project: 'p', endpoint: 'e', ca: 'Y2E=', alias: 'my-alias',
   });
   assert.equal(ctxName, 'my-alias');
   const doc = yaml.load(fs.readFileSync(kubeconfigPath, 'utf8'));
   assert.equal(doc.clusters[0].name, 'my-alias');
   assert.equal(doc.contexts[0].name, 'my-alias');
+});
+
+// Rule 4b: gcloud names its kubeconfig entries exactly gke_<project>_<location>_
+// <cluster>, so importing a cluster the user already has via `gcloud container
+// clusters get-credentials` silently replaces that entry's auth. writeCluster
+// must report this (replacedExternalAuth: true) so the caller can tell the
+// user, but must NOT report it when re-importing a cluster k8sight itself
+// wrote (replacedExternalAuth: false) — that overwrite is just our own upsert.
+test('reports replacedExternalAuth when overwriting a gcloud-style entry, not when overwriting our own', async () => {
+  const { mod, kubeconfigPath } = await freshGke();
+  const clusterArgs = { name: 'my-cluster', location: 'us-central1', project: 'my-project', endpoint: '1.2.3.4', ca: 'Y2E=' };
+  const ctxName = `gke_${clusterArgs.project}_${clusterArgs.location}_${clusterArgs.name}`;
+
+  // Seed the kubeconfig as gcloud itself would: a context/cluster/user already
+  // authenticating via gke-gcloud-auth-plugin, at the exact name gcloud uses.
+  const gcloudDoc = {
+    apiVersion: 'v1', kind: 'Config',
+    clusters: [{ name: ctxName, cluster: { server: `https://${clusterArgs.endpoint}` } }],
+    users: [{ name: ctxName, user: { exec: { apiVersion: 'client.authentication.k8s.io/v1beta1', command: 'gke-gcloud-auth-plugin', args: [] } } }],
+    contexts: [{ name: ctxName, context: { cluster: ctxName, user: ctxName } }],
+    'current-context': ctxName,
+  };
+  fs.writeFileSync(kubeconfigPath, yaml.dump(gcloudDoc), 'utf8');
+
+  const first = mod.writeCluster(clusterArgs);
+  assert.equal(first.context, ctxName);
+  assert.equal(first.replacedExternalAuth, true, 'overwriting a gcloud-authenticated entry must be reported');
+
+  // Re-importing the same cluster now overwrites the entry k8sight itself
+  // just wrote, which is not worth reporting.
+  const second = mod.writeCluster(clusterArgs);
+  assert.equal(second.replacedExternalAuth, false, 'overwriting our own entry must not be reported');
 });
 
 // Rule 5: a cluster with no public endpoint throws instead of writing a
