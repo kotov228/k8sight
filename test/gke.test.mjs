@@ -100,20 +100,50 @@ test('re-importing the same cluster upserts instead of duplicating entries', asy
   assert.equal(doc.clusters[0].cluster.server, 'https://9.9.9.9');
 });
 
-// Rule 3: the user entry's exec runs the bundled gke-token.js and never
-// mentions gcloud — that is the entire promise of the CLI-free feature.
-test('the exec entry runs gke-token.js and never mentions gcloud', async () => {
+// Rule 3: the exec entry runs the bundled gke-token.js through node and never
+// invokes a Google CLI — the entire promise of the feature.
+//
+// This asserts on the BINARY, not on the absence of the string "gcloud". An
+// ADC-based import legitimately points its --credentials argument at
+// ~/.config/gcloud/application_default_credentials.json, so a naive string
+// check would reject the very flow this feature is built around while still
+// passing on every other case — a test that looks strict and proves nothing.
+const GOOGLE_CLIS = ['gcloud', 'gke-gcloud-auth-plugin'];
+const execBinary = (exec) => path.basename(exec.command || '');
+
+test('the exec entry runs gke-token.js through node, not a Google CLI', async () => {
   const { mod, kubeconfigPath } = await freshGke();
   mod.writeCluster({
     name: 'c', location: 'l', project: 'p', endpoint: 'e', ca: 'Y2E=',
   });
-  const raw = fs.readFileSync(kubeconfigPath, 'utf8');
-  assert.doesNotMatch(raw, /gcloud/i);
 
-  const doc = yaml.load(raw);
-  const exec = doc.users[0].user.exec;
-  assert.ok(exec.args.some((a) => a.includes('gke-token.js')));
-  assert.doesNotMatch(JSON.stringify(exec), /gcloud/i);
+  const exec = yaml.load(fs.readFileSync(kubeconfigPath, 'utf8')).users[0].user.exec;
+  assert.ok(
+    !GOOGLE_CLIS.includes(execBinary(exec)),
+    `exec must not invoke a Google CLI, got "${execBinary(exec)}"`,
+  );
+  assert.ok(exec.args.some((a) => a.endsWith('gke-token.js')));
+});
+
+// The same guarantee on the ADC path, which is the common case. The
+// credentials argument points into gcloud's config directory; nothing runs
+// gcloud. This is the case the previous string-based assertion would have
+// wrongly failed.
+test('an ADC-based import still invokes no Google CLI', async () => {
+  const home = mkTmpHome();
+  const adcFile = writeAdc(home);
+  const { mod, kubeconfigPath } = await freshGke({ home });
+  mod.writeCluster({
+    name: 'c', location: 'l', project: 'p', endpoint: 'e', ca: 'Y2E=',
+  });
+
+  const exec = yaml.load(fs.readFileSync(kubeconfigPath, 'utf8')).users[0].user.exec;
+  assert.ok(!GOOGLE_CLIS.includes(execBinary(exec)));
+  assert.equal(
+    exec.args[exec.args.indexOf('--credentials') + 1],
+    adcFile,
+    'an ADC import must point the exec entry at the ADC file itself',
+  );
 });
 
 // Rule 4: an alias overrides the generated context name.
