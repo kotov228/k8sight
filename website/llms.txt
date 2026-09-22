@@ -1,0 +1,40 @@
+# k8sight
+
+> k8sight is a free, open-source native desktop app (macOS, Windows and Linux) for browsing and operating any Kubernetes cluster from your local kubeconfig. It gives you a live dashboard, pod logs, an in-pod shell, interactive topology, Helm, Argo CD, a built-in Security Center (image CVEs, config and RBAC audit via bundled Trivy), a bring-your-own-model AI assistant, and one-click AWS EKS / Azure AKS onboarding — with nothing to install in-cluster. A demo mode lets you try every feature with no cluster required.
+
+## What k8sight is
+
+- **Category:** a desktop UI for Kubernetes clusters you already have — a peer of Lens and k9s, not a management platform like Rancher.
+- **Runs where:** on your laptop. It reads your kubeconfig and operates no servers of its own; the local API binds to 127.0.0.1 by default.
+- **Price:** free and open-source (MIT-style license). No account or sign-in required.
+- **Platforms:** macOS (Apple Silicon .dmg), Windows (x64 .exe), Linux (.AppImage and .deb), plus a Docker image.
+- **Requirements:** kubectl on your PATH and a working kubeconfig. It does not require the aws, az, kubelogin or helm CLIs.
+
+## How k8sight compares
+
+- **vs Rancher:** Rancher is a multi-cluster platform you deploy inside clusters to provision and govern a fleet for a team. k8sight is a local desktop app that reads your kubeconfig and needs nothing in-cluster. Use Rancher to govern a fleet; use k8sight as a fast local cockpit for clusters you already run.
+- **vs Lens / k9s:** k8sight is in the same category (a client-side UI). It adds a built-in security scanner (bundled Trivy), an AI assistant that reads your live cluster, and a demo mode that works with no cluster. k9s is a terminal UI; Lens now requires a sign-in.
+
+## Key features
+
+- Live cluster dashboard: node and pod health, workload charts, capacity.
+- Every workload type with live CPU/memory and cross-links (namespace → node → pod → owner).
+- Pod logs, an in-pod shell (real TTY), and port-forwarding.
+- Interactive pan/zoom topology graph and lazy-loaded Custom Resource tree.
+- Helm releases with values and rendered manifests.
+- First-class Argo CD GitOps dashboard with sync/refresh/rollback.
+- Security Center: image CVEs, config and RBAC audit, exposed secrets — via Trivy Operator reports or a bundled Trivy binary.
+- One-click AWS EKS and Azure AKS onboarding across accounts/subscriptions; GKE, on-prem, kind and minikube work from your existing kubeconfig.
+- Bring-your-own-model AI assistant grounded in live cluster data (secrets redacted before anything leaves the app).
+- MCP server so external AI agents can inspect the cluster (read tools by default; write tools opt-in).
+- Demo mode: a realistic synthetic cluster, no kubeconfig required.
+
+## Links
+
+- Home: https://k8sight.in/
+- Documentation: https://k8sight.in/docs
+- Comparison (k8sight vs Rancher vs Lens/k9s): https://k8sight.in/docs#compare
+- Download (all platforms): https://github.com/praveenraghav01/k8sight/releases/latest
+- Source code (GitHub): https://github.com/praveenraghav01/k8sight
+- Privacy policy: https://k8sight.in/privacy
+- Terms of service: https://k8sight.in/terms
