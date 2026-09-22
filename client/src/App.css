@@ -1259,6 +1259,23 @@ body {
   white-space: nowrap;
 }
 
+.resource-table thead th.sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.12s;
+}
+.resource-table thead th.sortable:hover,
+.resource-table thead th.sorted { color: var(--text); }
+
+.resource-table thead th .sort-arrow {
+  margin-left: 5px;
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.resource-table thead th.sortable:hover .sort-arrow { opacity: 0.45; }
+.resource-table thead th.sorted .sort-arrow { opacity: 1; color: var(--accent); }
+
 .resource-table tbody td {
   padding: 11px 16px;
   border-bottom: 1px solid var(--border-subtle);
