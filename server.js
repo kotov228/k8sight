@@ -363,11 +363,14 @@ app.get('/api/config/status', (req, res) => {
 
   // Tag each context with its cloud provider (derived from the cluster's server
   // URL) so the UI can group and icon them.
-  const providerOf = (server = '') => {
+  const providerOf = (server = '', name = '') => {
     const s = server.toLowerCase();
     if (s.includes('.azmk8s.io') || s.includes('azure')) return 'azure';
     if (s.includes('.eks.amazonaws.com') || s.includes('eks.') ) return 'aws';
-    if (s.includes('.gke.') || s.includes('container.googleapis.com')) return 'gcp';
+    // GKE is reached on a bare public IP, so the server URL says nothing. Both
+    // gcloud and this app name their contexts gke_<project>_<location>_<cluster>,
+    // which is the only reliable signal.
+    if (s.includes('.gke.') || s.includes('container.googleapis.com') || name.toLowerCase().startsWith('gke_')) return 'gcp';
     if (/(127\.0\.0\.1|localhost|:6443|:8443|host\.docker|kubernetes\.docker|minikube|kind|orbstack|rancher)/.test(s)) return 'local';
     return 'other';
   };
@@ -377,7 +380,7 @@ app.get('/api/config/status', (req, res) => {
     const clusterByName = new Map(kubeConfig.clusters.map((c) => [c.name, c]));
     contextsInfo = kubeConfig.contexts.map((c) => {
       const cl = clusterByName.get(c.cluster);
-      return { name: c.name, cluster: c.cluster, provider: providerOf(cl?.server) };
+      return { name: c.name, cluster: c.cluster, provider: providerOf(cl?.server, c.name) };
     });
     contexts = kubeConfig.contexts.map((c) => c.name);
     clusters = kubeConfig.clusters.map((c) => c.name);
