@@ -78,6 +78,23 @@ jobs:
         run: npm run dist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- macOS code signing + notarization (ignored on Windows/Linux) ---
+          # electron-builder imports the base64-encoded Developer ID .p12 from
+          # CSC_LINK into a temporary keychain and signs with the Hardened
+          # Runtime entitlements in build/. If these secrets are unset the mac
+          # build stays unsigned (a warning, not a failure), so the pipeline
+          # keeps working until they're configured. Required repo secrets:
+          #   MAC_CSC_LINK               base64 of the Developer ID .p12
+          #   MAC_CSC_KEY_PASSWORD       password for that .p12
+          #   APPLE_ID                   Apple ID email (notarization)
+          #   APPLE_APP_SPECIFIC_PASSWORD  app-specific password
+          #   APPLE_TEAM_ID              10-char Developer Team ID
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # Consumed by electron/notarize.cjs (afterSign hook).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
