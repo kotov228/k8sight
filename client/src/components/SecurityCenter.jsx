@@ -74,7 +74,7 @@ function Donut({ title, segments, size = 130, onSegmentClick, activeKey }) {
   );
 }
 
-export default function SecurityCenter({ namespaces = [], onNavigate, view, onViewChange }) {
+export default function SecurityCenter({ namespaces = [], onNavigate, view, onViewChange, refreshSignal = 0 }) {
   const [status, setStatus] = useState(null);
   // Tab is controlled by the sidebar (view/onViewChange) when provided; the
   // in-view tab bar stays in sync and also works standalone.
@@ -104,15 +104,28 @@ export default function SecurityCenter({ namespaces = [], onNavigate, view, onVi
   const get = (path, extra = {}) => axios.get(path, { params: { ...(ns !== 'all' ? { namespace: ns } : {}), ...extra } }).then((r) => r.data);
 
   // Operator mode: read the report CRDs.
-  useEffect(() => {
+  const loadReports = ({ silent = false } = {}) => {
     if (!operatorMode) return;
-    setDetail(null); setLoading(true);
+    if (!silent) { setDetail(null); setLoading(true); }
     const done = () => setLoading(false);
     if (tab === 'overview' || tab === 'images') { get('/api/security/vulnerabilities').then(setVuln).catch(() => {}).finally(done); }
     else if (tab === 'resources') { get('/api/security/checks', { kind: 'config' }).then(setConfig).catch(() => {}).finally(done); }
     else if (tab === 'roles') { get('/api/security/checks', { kind: 'rbac' }).then(setRbac).catch(() => {}).finally(done); }
+  };
+
+  useEffect(() => {
+    loadReports();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, ns, operatorMode]);
+
+  // Global/auto refresh: re-read the reports quietly, keeping the open detail
+  // pane. Scan mode is left alone — scans are expensive and user-triggered.
+  const didMount = useRef(false);
+  useEffect(() => {
+    if (!didMount.current) { didMount.current = true; return; }
+    loadReports({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSignal]);
 
   // Scan mode: check trivy availability + load any prior/persisted scan result.
   useEffect(() => {
