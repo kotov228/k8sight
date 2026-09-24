@@ -28,7 +28,7 @@ const formatMemory = (mem) => {
   return mem;
 };
 
-export default function Nodes({ focusNode, onFocusHandled, onNavigate, refreshSignal = 0 }) {
+export default function Nodes({ active = true, focusNode, onFocusHandled, onNavigate, refreshSignal = 0 }) {
   const [nodes, setNodes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -59,32 +59,38 @@ export default function Nodes({ focusNode, onFocusHandled, onNavigate, refreshSi
 
   // Auto-select a node when navigated here via a cross-link
   useEffect(() => {
-    if (!focusNode || !nodes.length) return;
+    if (!active || !focusNode || !nodes.length) return;
     const match = nodes.find(n => n.name === focusNode);
     if (match) {
       setSelectedNode(match);
       setActiveTab('details');
     }
     onFocusHandled?.();
-  }, [focusNode, nodes]);
+  }, [active, focusNode, nodes]);
 
   // Live node metrics polling for the detail graphs. Keyed on the node *name*:
   // a refresh swaps in a new node object for the same node, and re-running this
   // would wipe the collected history.
   const selectedNodeName = selectedNode?.name;
+  const metricsNodeRef = useRef(null);
   useEffect(() => {
-    if (!selectedNodeName) return;
-    let active = true;
+    if (metricsNodeRef.current === selectedNodeName) return;
+    metricsNodeRef.current = selectedNodeName || null;
     setNcpuHist([]);
     setNmemHist([]);
     setNMetricsNow(null);
     setNMetricsAvail(true);
+  }, [selectedNodeName]);
+
+  useEffect(() => {
+    if (!active || !selectedNodeName) return;
+    let live = true;
     let pollTimer;
     const poll = async () => {
       let nextPollDelay = 3000;
       try {
         const res = await axios.get(`/api/metrics/node/${encodeURIComponent(selectedNodeName)}`);
-        if (!active) return;
+        if (!live) return;
         if (res.data?.refreshing) nextPollDelay = 750;
         setNMetricsNow(res.data);
         setNMetricsAvail(res.data?.available !== false);
@@ -93,20 +99,20 @@ export default function Nodes({ focusNode, onFocusHandled, onNavigate, refreshSi
           if (Number.isFinite(res.data?.memBytes)) setNmemHist(h => [...h, res.data.memBytes].slice(-40));
         }
       } catch (e) {
-        if (active) setNMetricsAvail(false);
+        if (live) setNMetricsAvail(false);
       } finally {
-        if (active) pollTimer = setTimeout(poll, nextPollDelay);
+        if (live) pollTimer = setTimeout(poll, nextPollDelay);
       }
     };
     poll();
-    return () => { active = false; clearTimeout(pollTimer); };
-  }, [selectedNodeName]);
+    return () => { live = false; clearTimeout(pollTimer); };
+  }, [active, selectedNodeName]);
 
   useEffect(() => {
-    if (selectedNodeName && activeTab === 'pods') {
+    if (active && selectedNodeName && activeTab === 'pods') {
       fetchNodePods(selectedNodeName);
     }
-  }, [selectedNodeName, activeTab]);
+  }, [active, selectedNodeName, activeTab]);
 
   const fetchNodes = async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);

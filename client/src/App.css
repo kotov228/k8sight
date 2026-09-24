@@ -165,7 +165,16 @@ body {
   flex-direction: column;
   overflow: hidden;
 }
-.content-col > :first-child { flex: 1; min-height: 0; }
+.content-col > .cached-view-slot {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.content-col > .cached-view-slot[hidden] { display: none; }
+.cached-view-slot > :first-child { flex: 1; min-width: 0; min-height: 0; }
 
 .error-banner {
   background: var(--red-tint);
@@ -1234,6 +1243,8 @@ body {
   overflow: auto;
   position: relative;
 }
+.resource-events-cache { height: 100%; }
+.resource-events-cache[hidden] { display: none; }
 
 .resource-table {
   width: 100%;
