@@ -81,17 +81,21 @@ export default function Nodes({ focusNode, onFocusHandled, onNavigate, refreshSi
     setNMetricsAvail(true);
     let pollTimer;
     const poll = async () => {
+      let nextPollDelay = 3000;
       try {
         const res = await axios.get(`/api/metrics/node/${encodeURIComponent(selectedNodeName)}`);
         if (!active) return;
+        if (res.data?.refreshing) nextPollDelay = 750;
         setNMetricsNow(res.data);
         setNMetricsAvail(res.data?.available !== false);
-        if (Number.isFinite(res.data?.cpuMilli)) setNcpuHist(h => [...h, res.data.cpuMilli].slice(-40));
-        if (Number.isFinite(res.data?.memBytes)) setNmemHist(h => [...h, res.data.memBytes].slice(-40));
+        if (!res.data?.refreshing && !res.data?.stale) {
+          if (Number.isFinite(res.data?.cpuMilli)) setNcpuHist(h => [...h, res.data.cpuMilli].slice(-40));
+          if (Number.isFinite(res.data?.memBytes)) setNmemHist(h => [...h, res.data.memBytes].slice(-40));
+        }
       } catch (e) {
         if (active) setNMetricsAvail(false);
       } finally {
-        if (active) pollTimer = setTimeout(poll, 3000);
+        if (active) pollTimer = setTimeout(poll, nextPollDelay);
       }
     };
     poll();

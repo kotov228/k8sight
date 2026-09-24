@@ -167,21 +167,25 @@ export default function ResourceDrawer({ resource, namespace, resourceType, onCl
 
     let pollTimer;
     const poll = async () => {
+      let nextPollDelay = 3000;
       try {
         const res = await axios.get(`/api/metrics/pod/${encodeURIComponent(ns)}/${encodeURIComponent(resource.name)}`);
         if (!active) return;
+        if (res.data?.refreshing) nextPollDelay = 750;
         if (res.data?.available === false) {
           setMetricsNow(res.data);
           setMetricsAvail(false);
           return;
         }
         setMetricsNow(res.data);
-        if (Number.isFinite(res.data?.cpuMilli)) setCpuHist(h => [...h, res.data.cpuMilli].slice(-40));
-        if (Number.isFinite(res.data?.memBytes)) setMemHist(h => [...h, res.data.memBytes].slice(-40));
+        if (!res.data?.refreshing && !res.data?.stale) {
+          if (Number.isFinite(res.data?.cpuMilli)) setCpuHist(h => [...h, res.data.cpuMilli].slice(-40));
+          if (Number.isFinite(res.data?.memBytes)) setMemHist(h => [...h, res.data.memBytes].slice(-40));
+        }
       } catch (e) {
         if (active) setMetricsAvail(false);
       } finally {
-        if (active) pollTimer = setTimeout(poll, 3000);
+        if (active) pollTimer = setTimeout(poll, nextPollDelay);
       }
     };
     poll();

@@ -26,6 +26,7 @@ import * as gke from './gke.js';
 import * as trivyScan from './trivy-scan.js';
 import * as demo from './demo.js';
 import { ensurePtyHelperExecutable } from './lib/pty-helper.mjs';
+import { createMetricResponseCache } from './lib/metric-response-cache.mjs';
 
 // node-pty powers the pod terminal (a real PTY bridged to `kubectl exec`). Load
 // it defensively so a missing/unbuildable native module never crashes the whole
@@ -54,11 +55,13 @@ const AZURE_TOKEN_HELPER = path.join(__dirname, 'azure-token.js');
 // Response caching with TTL
 const cache = new Map();
 const inFlight = new Map();
-const metricResponseCache = new Map();
-const METRIC_RESPONSE_FRESH_MS = 2500;
-const METRIC_RESPONSE_RETRY_BASE_MS = 5_000;
-const METRIC_RESPONSE_RETRY_MAX_MS = 60_000;
-const METRIC_RESPONSE_CACHE_MAX_ENTRIES = 300;
+const metricResponseCache = createMetricResponseCache({
+  refreshAfterMs: 2_000,
+  staleAfterMs: 8_000,
+  retryBaseMs: 1_000,
+  retryMaxMs: 4_000,
+  maxEntries: 300
+});
 const CACHE_TTL = {
   resources: 30000, // 30 seconds
   events: 15000,    // 15 seconds
@@ -88,67 +91,7 @@ const runSingleFlight = (key, operation) => {
   inFlight.set(key, promise);
   return promise;
 };
-const touchMetricResponse = (key, entry) => {
-  metricResponseCache.delete(key);
-  metricResponseCache.set(key, entry);
-  while (metricResponseCache.size > METRIC_RESPONSE_CACHE_MAX_ENTRIES) {
-    metricResponseCache.delete(metricResponseCache.keys().next().value);
-  }
-};
-const markMetricResponseRefreshFailed = (key, entry) => {
-  if (!entry) return;
-  const failedAttempts = (entry.failedAttempts || 0) + 1;
-  const retryDelay = Math.min(
-    METRIC_RESPONSE_RETRY_BASE_MS * (2 ** Math.min(failedAttempts - 1, 4)),
-    METRIC_RESPONSE_RETRY_MAX_MS
-  );
-  touchMetricResponse(key, { ...entry, failedAttempts, retryAfter: Date.now() + retryDelay });
-};
-const hasMetricUsage = (data) => data && (data.cpuMilli != null || data.memBytes != null);
-const refreshMetricResponse = (key, loader) => runSingleFlight(`metric-response:${key}`, async () => {
-  const latest = metricResponseCache.get(key);
-  const now = Date.now();
-  if (latest && now - latest.updatedAt < METRIC_RESPONSE_FRESH_MS) return latest.data;
-  if (latest?.retryAfter > now) return latest.data;
-  try {
-    const data = await loader();
-    // A successful HTTP response can still mean Prometheus and Metrics API
-    // temporarily have no samples. Keep the last usable snapshot in that case.
-    if (latest && (
-      (latest.data.available === true && data?.available !== true)
-      || (hasMetricUsage(latest.data) && !hasMetricUsage(data))
-    )) {
-      markMetricResponseRefreshFailed(key, latest);
-      return latest.data;
-    }
-    touchMetricResponse(key, { data, updatedAt: Date.now(), failedAttempts: 0, retryAfter: 0 });
-    return data;
-  } catch (error) {
-    markMetricResponseRefreshFailed(key, latest);
-    throw error;
-  }
-});
-const getMetricResponse = async (key, loader) => {
-  const entry = metricResponseCache.get(key);
-  if (entry) {
-    const age = Date.now() - entry.updatedAt;
-    if (age < METRIC_RESPONSE_FRESH_MS && !entry.failedAttempts) {
-      touchMetricResponse(key, entry);
-      return { data: { ...entry.data, stale: false, refreshing: false }, state: 'hit' };
-    }
-    touchMetricResponse(key, entry);
-    if (!(entry.retryAfter > Date.now())) {
-      refreshMetricResponse(key, loader).catch(() => {});
-    }
-    const refreshing = inFlight.has(`metric-response:${key}`);
-    return {
-      data: { ...entry.data, stale: true, refreshing, cacheAgeMs: age },
-      state: 'stale'
-    };
-  }
-  const data = await refreshMetricResponse(key, loader);
-  return { data: { ...data, stale: false, refreshing: false }, state: 'miss' };
-};
+const getMetricResponse = (key, loader) => metricResponseCache.get(key, loader);
 
 app.use(compression());
 
