@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Hardened Runtime entitlements for the main k8sight app bundle.
+
+    The app is NOT sandboxed: it reads ~/.kube/config, spawns kubectl / trivy /
+    az and a node-pty PTY, and talks to cluster + cloud endpoints. Under the
+    Hardened Runtime (required for notarization) Electron still needs the JIT
+    exceptions below, and library validation must be relaxed so the app can load
+    node-pty's native addon and execute the bundled/auto-downloaded trivy binary.
+  -->
+
+  <!-- Electron / V8 just-in-time compilation. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!-- Load the node-pty native addon and run bundled/downloaded helper binaries
+       (trivy) that are not part of this signature. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- node-pty's spawn-helper and kubectl exec rely on DYLD_* env passthrough. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!-- "Open in Terminal" launches Terminal.app via Apple events. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

@@ -51,6 +51,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
     "concurrently": "^8.2.0",
     "electron": "^44.0.0",
     "electron-builder": "^26.15.3"
@@ -60,6 +61,7 @@
     "productName": "k8sight",
     "asar": false,
     "afterPack": "electron/after-pack.cjs",
+    "afterSign": "electron/notarize.cjs",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -89,8 +91,11 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
-      "identity": null,
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "notarize": false,
       "artifactName": "${productName}-macos.${ext}",
       "target": [
         {
