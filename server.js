@@ -1,10 +1,10 @@
 import express from 'express';
-import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
-import { execSync, spawnSync, spawn, execFile } from 'child_process';
+import { execFileSync, spawnSync, spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -22,12 +22,18 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'crypto';
 import { createMcpServer } from './mcp.js';
 import * as awsEks from './aws-eks.js';
+import * as trivyScan from './trivy-scan.js';
+import * as demo from './demo.js';
+import { ensurePtyHelperExecutable } from './lib/pty-helper.mjs';
 
 // node-pty powers the pod terminal (a real PTY bridged to `kubectl exec`). Load
 // it defensively so a missing/unbuildable native module never crashes the whole
 // server — only the terminal feature is disabled in that (rare) case.
 let pty = null;
 try {
+  // Restore node-pty's spawn-helper execute bit BEFORE first use, so pod
+  // terminals don't fail with "posix_spawnp failed". See lib/pty-helper.mjs.
+  ensurePtyHelperExecutable({ currentOnly: true });
   pty = (await import('node-pty')).default;
 } catch (e) {
   console.warn('[terminal] node-pty is unavailable; pod shells are disabled:', e.message);
@@ -40,6 +46,9 @@ const app = express();
 // with `docker run -p <host>:3001`.
 const PORT = 3001;
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
+// CLI-free AKS token helper — app-imported AAD clusters exec this instead of
+// kubelogin, so neither `az` nor `kubelogin` is needed at runtime.
+const AZURE_TOKEN_HELPER = path.join(__dirname, 'azure-token.js');
 
 // Response caching with TTL
 const cache = new Map();
@@ -65,8 +74,116 @@ const getCache = (key) => {
 };
 
 app.use(compression());
-app.use(cors());
+
+// ------------------------------------------------------------------
+// Origin guard (replaces the old wildcard CORS). The backend exposes a
+// read/write cluster API and an exec WebSocket with no per-request auth, so a
+// browser page on another origin must not be able to drive it with the user's
+// ambient credentials. Paired with the loopback bind below (LAN protection),
+// this closes the drive-by / cross-site vector without any frontend change.
+//
+//   • No Origin header  → allowed. Non-browser clients (curl, MCP over stdio,
+//     the server's own self-HTTP MCP calls) never send one; same-origin GET
+//     navigations may omit it too.
+//   • Origin host == Host header → allowed. Covers same-origin production,
+//     packaged Electron (127.0.0.1:PORT) and any Docker/reverse-proxy host,
+//     with no host list to maintain.
+//   • Dev origins (Vite proxy forwards the browser's localhost:3000 Origin
+//     while the Host becomes localhost:PORT) and any ALLOWED_ORIGINS entries
+//     → allowed.
+//   • Anything else with an Origin → 403.
+const DEV_ORIGINS = new Set([
+  'http://localhost:3000', 'http://127.0.0.1:3000',
+  `http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`,
+]);
+const EXTRA_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+for (const o of EXTRA_ORIGINS) DEV_ORIGINS.add(o);
+
+const isAllowedOrigin = (origin, host) => {
+  if (!origin) return true; // non-browser client, or same-origin request with no Origin
+  if (DEV_ORIGINS.has(origin)) return true;
+  try { return new URL(origin).host === host; } catch { return false; }
+};
+
+// Guard the API and MCP surface. Static assets (the built UI) are intentionally
+// not guarded — they carry no cluster capability.
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api') && !req.path.startsWith('/mcp')) return next();
+  if (isAllowedOrigin(req.headers.origin, req.headers.host)) return next();
+  return res.status(403).json({ error: 'Cross-origin request rejected' });
+});
+
+// Rate-limit the API/MCP surface. The server binds to loopback and enforces
+// same-origin, so this is defense-in-depth (a runaway client or same-origin
+// script hammering the API) rather than a perimeter control — hence a generous
+// fixed-window cap.
+const apiLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: Number(process.env.RATE_LIMIT_MAX) || 1000, // requests/min/IP
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+app.use('/api', apiLimiter);
+app.use('/mcp', apiLimiter);
+
 app.use(express.json());
+
+// ------------------------------------------------------------------
+// Demo mode — when the active context is the synthetic 'demo-cluster',
+// serve an in-memory cluster (demo.js) so every feature is explorable with
+// no real cluster. This single interception covers all data + mutation
+// endpoints; config/cloud/MCP/static fall through, and the assistant is
+// handled explicitly (canned, no LLM needed).
+// ------------------------------------------------------------------
+app.use((req, res, next) => {
+  if (!demo.isDemo(currentContext)) return next();
+  const p = req.path;
+  // Real config handlers stay in charge (they are demo-aware).
+  if (p === '/api/config/status' || p === '/api/config/context' ||
+      p === '/api/config/load' || p === '/api/config/reload') return next();
+  // Auth always "passes" in demo.
+  if (p === '/api/config/auth') return res.json({ ok: true, currentContext: demo.DEMO_CONTEXT });
+  // Assistant: report enabled + stream canned answers (no LLM required).
+  if (p === '/api/assistant/status') {
+    return res.json({ enabled: true, source: 'demo', editable: false, baseUrl: '', model: 'k8sight-demo (canned)' });
+  }
+  if (p === '/api/assistant/chat' && req.method === 'POST') return demoAssistantChat(req, res);
+  // Cloud sign-in, agent detection, MCP, version and non-API paths are unchanged.
+  if (p.startsWith('/api/azure') || p.startsWith('/api/aws') ||
+      p.startsWith('/api/ai-agents') || p === '/mcp' || p === '/api/version' ||
+      !p.startsWith('/api/')) return next();
+  // Everything else under /api is cluster data → the synthetic cluster.
+  if (demo.handle(req, res)) return;
+  return next();
+});
+
+// Canned, streamed assistant reply for demo mode — matches the SSE event
+// shape of /api/assistant/chat (token / tool / done).
+function demoAssistantChat(req, res) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  const send = (type, data) => { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); res.flush?.(); };
+  const history = (req.body && req.body.messages) || [];
+  const last = [...history].reverse().find((m) => m && m.role === 'user');
+  const { text, toolCalls } = demo.aiReply(last?.text || '');
+  (toolCalls || []).forEach((name) => send('tool', { name, input: {} }));
+  const words = String(text).split(/(\s+)/);
+  let i = 0;
+  const tick = () => {
+    if (res.writableEnded) return;
+    if (i >= words.length) { send('done', {}); return res.end(); }
+    send('token', { text: words[i++] });
+    setTimeout(tick, 18);
+  };
+  // Stop streaming if the client actually disconnects (res 'close', not req —
+  // req 'close' fires as soon as the small POST body is read).
+  res.on('close', () => { i = words.length; });
+  setTimeout(tick, (toolCalls && toolCalls.length) ? 250 : 0);
+}
 
 // Serve the built frontend in production (when client/dist exists)
 if (fs.existsSync(CLIENT_DIST)) {
@@ -79,10 +196,10 @@ let kubeConfig = null;
 // The app switches context in-memory (kubeConfig.setCurrentContext); the on-disk
 // kubeconfig that `kubectl` reads does NOT reflect that. So every kubectl
 // shell-out must be told which context to use, or it silently targets a
-// different cluster after the user switches. kctl() = args form; kctlStr() =
-// string form for the few execSync string commands.
+// different cluster after the user switches. kctl() builds the argv form — the
+// only form used now, so the context name is never interpolated into a shell
+// string (which would allow injection from a hostile kubeconfig's context name).
 const kctl = (...args) => (currentContext ? ['--context', currentContext, ...args] : args);
-const kctlStr = () => (currentContext ? `--context ${currentContext} ` : '');
 
 const getKubeConfigPath = () => {
   const envPath = process.env.KUBECONFIG;
@@ -134,20 +251,68 @@ app.get('/api/version', (req, res) => {
   res.json({ version: getAppVersion() });
 });
 
-app.get('/api/config/status', (req, res) => {
-  if (!kubeConfig) {
-    const attemptedPath = getKubeConfigPath();
-    return res.json({
-      loaded: false,
-      contexts: [],
-      defaultPath: attemptedPath,
-      exists: fs.existsSync(attemptedPath)
-    });
+// Persisted app settings (small JSON in the user config dir). Used so the
+// desktop app can toggle MCP write tools from the UI instead of an env var.
+const SETTINGS_DIR = path.join(os.homedir(), '.config', 'k8s-manager');
+const SETTINGS_FILE = path.join(SETTINGS_DIR, 'settings.json');
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); } catch { return {}; }
+}
+function writeSettings(patch) {
+  const next = { ...readSettings(), ...patch };
+  try {
+    fs.mkdirSync(SETTINGS_DIR, { recursive: true });
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2), { mode: 0o600 });
+  } catch (e) { /* best-effort */ }
+  return next;
+}
+// MCP write tools: the persisted UI toggle wins; MCP_ALLOW_WRITE is the initial
+// default when nothing has been set yet.
+let mcpAllowWrite = (() => {
+  const s = readSettings();
+  if (typeof s.mcpAllowWrite === 'boolean') return s.mcpAllowWrite;
+  return ['1', 'true', 'yes'].includes(String(process.env.MCP_ALLOW_WRITE || '').toLowerCase());
+})();
+
+// MCP connection info for the Preferences → MCP section. The HTTP endpoint is
+// this same server at /mcp; write tools are gated by `mcpAllowWrite`.
+app.get('/api/mcp/info', (req, res) => {
+  res.json({
+    allowWrite: mcpAllowWrite,
+    readTools: [
+      'list_contexts', 'switch_context', 'list_namespaces', 'list_resources',
+      'get_resource', 'get_resource_yaml', 'get_pod_logs', 'get_events', 'get_topology',
+      'get_cluster_summary', 'list_nodes', 'get_node_pods', 'get_node_metrics',
+      'get_pod_metrics', 'list_pod_metrics', 'list_storage', 'get_rbac',
+      'list_helm_releases', 'get_helm_values', 'get_helm_manifest',
+      'list_crds', 'list_custom_resources', 'get_custom_resource',
+      'get_argocd_status', 'list_argocd_apps', 'get_argocd_app',
+      'list_argocd_projects', 'list_argocd_appsets', 'list_argocd_repositories', 'list_argocd_clusters',
+    ],
+    writeTools: [
+      'apply_yaml', 'delete_resource', 'scale_workload', 'rollout_restart',
+      'sync_argocd_app', 'refresh_argocd_app',
+    ],
+  });
+});
+
+// Toggle MCP write tools from the UI (persisted). Takes effect for new MCP
+// sessions — a connected agent must reconnect to pick up the new tool set.
+app.post('/api/mcp/config', (req, res) => {
+  const { allowWrite } = req.body || {};
+  if (typeof allowWrite !== 'boolean') {
+    return res.status(400).json({ error: 'allowWrite (boolean) is required' });
   }
+  mcpAllowWrite = allowWrite;
+  writeSettings({ mcpAllowWrite: allowWrite });
+  res.json({ allowWrite: mcpAllowWrite });
+});
+
+app.get('/api/config/status', (req, res) => {
+  const demoInfo = demo.demoContextInfo(); // { name, cluster, provider: 'demo' }
 
   // Tag each context with its cloud provider (derived from the cluster's server
   // URL) so the UI can group and icon them.
-  const clusterByName = new Map(kubeConfig.clusters.map((c) => [c.name, c]));
   const providerOf = (server = '') => {
     const s = server.toLowerCase();
     if (s.includes('.azmk8s.io') || s.includes('azure')) return 'azure';
@@ -156,18 +321,42 @@ app.get('/api/config/status', (req, res) => {
     if (/(127\.0\.0\.1|localhost|:6443|:8443|host\.docker|kubernetes\.docker|minikube|kind|orbstack|rancher)/.test(s)) return 'local';
     return 'other';
   };
-  const contextsInfo = kubeConfig.contexts.map((c) => {
-    const cl = clusterByName.get(c.cluster);
-    return { name: c.name, cluster: c.cluster, provider: providerOf(cl?.server) };
-  });
+
+  let contexts = [], contextsInfo = [], clusters = [];
+  if (kubeConfig) {
+    const clusterByName = new Map(kubeConfig.clusters.map((c) => [c.name, c]));
+    contextsInfo = kubeConfig.contexts.map((c) => {
+      const cl = clusterByName.get(c.cluster);
+      return { name: c.name, cluster: c.cluster, provider: providerOf(cl?.server) };
+    });
+    contexts = kubeConfig.contexts.map((c) => c.name);
+    clusters = kubeConfig.clusters.map((c) => c.name);
+  }
+
+  // The synthetic demo cluster is always offered, listed first.
+  contexts = [demoInfo.name, ...contexts];
+  contextsInfo = [demoInfo, ...contextsInfo];
+  clusters = [demoInfo.cluster, ...clusters];
+
+  const inDemo = demo.isDemo(currentContext);
+  if (!kubeConfig && !inDemo) {
+    const attemptedPath = getKubeConfigPath();
+    return res.json({
+      loaded: false,
+      contexts,
+      contextsInfo,
+      defaultPath: attemptedPath,
+      exists: fs.existsSync(attemptedPath),
+    });
+  }
 
   res.json({
     loaded: true,
-    currentContext,
-    path: getKubeConfigPath(),
-    contexts: kubeConfig.contexts.map(c => c.name),
+    currentContext: inDemo ? demoInfo.name : currentContext,
+    path: inDemo ? 'demo (synthetic cluster)' : getKubeConfigPath(),
+    contexts,
     contextsInfo,
-    clusters: kubeConfig.clusters.map(c => c.name)
+    clusters,
   });
 });
 
@@ -191,6 +380,13 @@ app.post('/api/config/load', (req, res) => {
 
 app.post('/api/config/context', (req, res) => {
   const { contextName } = req.body;
+
+  // Enter the synthetic demo cluster (works with no kubeconfig at all).
+  if (demo.isDemo(contextName)) {
+    currentContext = demo.DEMO_CONTEXT;
+    cache.clear();
+    return res.json({ success: true, currentContext });
+  }
 
   if (!kubeConfig) {
     return res.status(400).json({ error: 'No kubeconfig loaded' });
@@ -217,6 +413,23 @@ app.post('/api/config/context', (req, res) => {
   } catch (error) {
     res.status(500).json({ error: `Failed to set context: ${error.message}` });
   }
+});
+
+// Reload the kubeconfig from disk, preserving the in-memory selected context.
+// Building a fresh KubeConfig drops any cached exec-credential token, so after
+// an external re-login (`az login`, `aws sso login`, or the in-app sign-in flow)
+// the next auth check picks up the new token instead of reusing the stale one.
+app.post('/api/config/reload', (req, res) => {
+  const p = getKubeConfigPath();
+  if (!fs.existsSync(p)) return res.status(400).json({ error: 'No kubeconfig found' });
+  const prev = currentContext;
+  if (!loadKubeConfig(p)) return res.status(500).json({ error: 'Failed to reload kubeconfig' });
+  if (prev && kubeConfig?.contexts.some((c) => c.name === prev)) {
+    kubeConfig.setCurrentContext(prev);
+    currentContext = prev;
+  }
+  cache.clear();
+  res.json({ success: true, currentContext });
 });
 
 // ------------------------------------------------------------------
@@ -339,6 +552,31 @@ app.get('/api/azure/clusters', async (req, res) => {
 
 // Merge a fetched kubeconfig (YAML string) into an on-disk kubeconfig object,
 // de-duplicating clusters/users/contexts by name.
+// Rewrite an AAD cluster's kubeconfig user so it authenticates via our bundled
+// azure-token.js (CLI-free) instead of the kubelogin exec that ARM/az returns.
+// Cert-based users (non-AAD / --admin) have no exec and pass through untouched.
+// The well-known AKS AAD server app id is used when the source omits --server-id.
+const AKS_AAD_SERVER_ID = '6dae42f8-4368-4678-94ff-3960e28e3630';
+function nativizeAksExec(kcYaml) {
+  const kc = yaml.load(kcYaml) || {};
+  for (const u of (kc.users || [])) {
+    const exec = u?.user?.exec;
+    if (!exec) continue; // cert-based user — already CLI-free
+    const args = Array.isArray(exec.args) ? exec.args : [];
+    const getArg = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+    const serverId = getArg('--server-id') || AKS_AAD_SERVER_ID;
+    const tenant = getArg('--tenant-id') || getArg('--tenant') || azure.getTenant() || 'organizations';
+    u.user.exec = {
+      apiVersion: 'client.authentication.k8s.io/v1beta1',
+      command: process.execPath, // node
+      args: [AZURE_TOKEN_HELPER, '--server-id', serverId, '--tenant', tenant],
+      interactiveMode: 'Never',
+      provideClusterInfo: false,
+    };
+  }
+  return yaml.dump(kc);
+}
+
 function mergeKubeconfigYaml(existingPath, incomingYaml) {
   let base = { apiVersion: 'v1', kind: 'Config', clusters: [], users: [], contexts: [], 'current-context': '' };
   try { if (fs.existsSync(existingPath)) base = { ...base, ...(yaml.load(fs.readFileSync(existingPath, 'utf-8')) || {}) }; } catch { /* start fresh */ }
@@ -372,8 +610,11 @@ app.post('/api/azure/import', async (req, res) => {
         if (admin) args.push('--admin');
         await runAz(args, 90000);
       } else {
-        // Browser/REST: fetch the kubeconfig and merge it in ourselves.
-        const kc = await azure.getClusterKubeconfig(c.subscriptionId, c.resourceGroup, c.name, admin);
+        // Browser/REST: fetch the kubeconfig and merge it in ourselves. For AAD
+        // clusters (non-admin), rewrite the kubelogin exec to our bundled
+        // azure-token.js so the cluster needs neither `az` nor `kubelogin`.
+        const raw = await azure.getClusterKubeconfig(c.subscriptionId, c.resourceGroup, c.name, admin);
+        const kc = admin ? raw : nativizeAksExec(raw);
         const merged = mergeKubeconfigYaml(p, kc);
         fs.mkdirSync(path.dirname(p), { recursive: true }); // persist incrementally
         fs.writeFileSync(p, yaml.dump(merged), { mode: 0o600 });
@@ -413,8 +654,16 @@ app.get('/api/aws/status', async (req, res) => {
 app.post('/api/aws/sso-login', async (req, res) => {
   try {
     const { profile, startUrl: bodyUrl, ssoRegion: bodyRegion } = req.body || {};
-    // Accept pasted URLs with a "#/..." fragment or trailing slashes.
-    const clean = (u) => (u || '').trim().replace(/#.*$/, '').replace(/\/+$/, '');
+    // Accept pasted URLs with a "#/..." fragment or trailing slashes. Trim the
+    // fragment and trailing slashes without a backtracking regex (ReDoS-safe).
+    const clean = (u) => {
+      let s = String(u || '').trim();
+      const hash = s.indexOf('#');
+      if (hash !== -1) s = s.slice(0, hash);
+      let i = s.length;
+      while (i > 0 && s[i - 1] === '/') i--;
+      return s.slice(0, i);
+    };
     let startUrl = clean(bodyUrl), ssoRegion = bodyRegion;
     if (!startUrl || !ssoRegion) {
       // Fall back to an existing SSO profile's start URL / region.
@@ -446,7 +695,7 @@ app.get('/api/aws/sso-login/status', async (req, res) => {
 
 app.post('/api/aws/sso-login/cancel', (req, res) => { awsSession = null; res.json({ ok: true }); });
 
-// After SSO auth: choose an AWS account, then a role for it (Lens-style flow).
+// After SSO auth: choose an AWS account, then a role for it.
 app.get('/api/aws/sso-accounts', async (req, res) => {
   if (!awsSession?.sso?.accessToken) return res.status(400).json({ error: 'Not signed in to AWS SSO' });
   try { res.json({ accounts: await awsEks.ssoListAccounts(awsSession.sso) }); }
@@ -533,7 +782,7 @@ app.post('/api/aws/import', async (req, res) => {
 
 // ------------------------------------------------------------------
 // Bring-your-own AI agent — detect installed CLI agents and run them in a
-// terminal with the cluster context loaded (Lens-Prism style). No API key.
+// terminal with the cluster context loaded. No API key.
 // ------------------------------------------------------------------
 const AI_AGENTS = [
   { id: 'claude', name: 'Claude Code', command: 'claude', desc: 'The coding assistant by Anthropic', install: 'https://docs.anthropic.com/en/docs/claude-code' },
@@ -554,25 +803,53 @@ const loginShellPath = () => new Promise((resolve) => {
     resolve((loginPathCache = (!err && stdout ? String(stdout).trim() : '')));
   });
 });
-const commandExists = async (cmd) => {
-  const safe = String(cmd).replace(/[^a-zA-Z0-9_.-]/g, '');
-  if (!safe) return false;
+// Well-known bin directories a GUI-launched app's minimal PATH usually omits.
+const knownBinDirs = () => {
   const home = process.env.HOME || os.homedir();
-  const known = [
+  return [
     `${home}/.local/bin`, `${home}/bin`, `${home}/.npm-global/bin`,
     `${home}/.yarn/bin`, `${home}/.bun/bin`, `${home}/.deno/bin`, `${home}/.cargo/bin`,
     '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin',
   ];
+};
+const commandExists = async (cmd) => {
+  const safe = String(cmd).replace(/[^a-zA-Z0-9_.-]/g, '');
+  if (!safe) return false;
   const dirs = new Set([
     ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
     ...(await loginShellPath()).split(path.delimiter),
-    ...known,
+    ...knownBinDirs(),
   ].filter(Boolean));
   for (const dir of dirs) {
     try { fs.accessSync(path.join(dir, safe), fs.constants.X_OK); return true; } catch { /* keep looking */ }
   }
   return false;
 };
+
+// Resolve an executable to an ABSOLUTE path. node-pty spawns via posix_spawnp,
+// whose PATH lookup ignores the well-known dirs a GUI-launched macOS app is
+// missing — so `pty.spawn('kubectl', …)` fails with "posix_spawnp failed" even
+// though Node's execFile/spawn (used by the REST calls) resolve it fine. Search
+// the process PATH, the cached login-shell PATH, and the known dirs; fall back
+// to the bare name so PATH lookup can still try.
+const resolveBinSync = (cmd) => {
+  const safe = String(cmd).replace(/[^a-zA-Z0-9_.-]/g, '');
+  if (!safe) return cmd;
+  const dirs = [
+    ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
+    ...(loginPathCache ? loginPathCache.split(path.delimiter) : []),
+    ...knownBinDirs(),
+  ].filter(Boolean);
+  for (const dir of dirs) {
+    const p = path.join(dir, safe);
+    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* keep looking */ }
+  }
+  return cmd;
+};
+// Warm the login-shell PATH cache early so the first pod terminal can resolve
+// kubectl from a shell-configured location too (knownBinDirs already covers the
+// common Homebrew/local installs even before this resolves).
+loginShellPath();
 app.get('/api/ai-agents', async (req, res) => {
   const agents = await Promise.all(AI_AGENTS.map(async (a) => ({ id: a.id, name: a.name, command: a.command, desc: a.desc, install: a.install, installed: await commandExists(a.command) })));
   res.json({ agents });
@@ -602,7 +879,7 @@ app.post('/api/ai-agents/launch-external', (req, res) => {
       '#!/bin/bash',
       `export KUBECONFIG=${shq(kubeconfigPath)}`,
       `export KUBE_CONTEXT=${shq(currentContext || '')}`,
-      `echo "Cluster context: ${currentContext || '(default)'}"`,
+      `echo ${shq(`Cluster context: ${currentContext || '(default)'}`)}`,
       launch,
       `rm -f ${shq(kubeconfigPath)} ${shq(script)}`,
       'exec $SHELL -l',
@@ -1353,7 +1630,7 @@ app.get('/api/events/:namespace?', async (req, res) => {
 
 const fetchNodesWithKubectl = () => {
   try {
-    const output = execSync(`kubectl ${kctlStr()}get nodes -o json`, {
+    const output = execFileSync('kubectl', kctl('get', 'nodes', '-o', 'json'), {
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024,
       timeout: 5000
@@ -1428,8 +1705,9 @@ app.get('/api/nodes', async (req, res) => {
 
 const fetchPodsForNodeWithKubectl = (nodeName) => {
   try {
-    const output = execSync(
-      `kubectl get pods --all-namespaces --field-selector=spec.nodeName=${nodeName} -o json`,
+    const output = execFileSync(
+      'kubectl',
+      ['get', 'pods', '--all-namespaces', `--field-selector=spec.nodeName=${nodeName}`, '-o', 'json'],
       {
         encoding: 'utf-8',
         maxBuffer: 10 * 1024 * 1024,
@@ -1756,6 +2034,249 @@ const parseArgoApp = (a) => {
   };
 };
 
+// ------------------------------------------------------------------
+// Security Center — surfaces the Trivy Operator's report CRDs (image CVEs,
+// config-audit / best-practice checks, and RBAC risk assessment). The operator
+// (github.com/aquasecurity/trivy-operator) does the scanning in-cluster; we just
+// read and aggregate its reports, so there's nothing extra to install app-side.
+// ------------------------------------------------------------------
+const TRIVY_GROUP = 'aquasecurity.github.io';
+const TRIVY_VER = 'v1alpha1';
+const co = () => kubeConfig.makeApiClient(k8s.CustomObjectsApi);
+
+const listTrivy = async (plural, { cluster = false } = {}) => {
+  try {
+    // client-node 2.0 names the param `plural` on the cluster call but
+    // `resourcePlural` on the all-namespaces one.
+    const res = cluster
+      ? await co().listClusterCustomObject({ group: TRIVY_GROUP, version: TRIVY_VER, plural })
+      : await co().listCustomObjectForAllNamespaces({ group: TRIVY_GROUP, version: TRIVY_VER, resourcePlural: plural });
+    return res.items || [];
+  } catch (e) {
+    if (e?.code === 404 || e?.statusCode === 404) return null; // CRD not installed
+    throw e;
+  }
+};
+
+// Trivy labels the report with the scanned resource it belongs to.
+const trivyOwner = (r) => {
+  const l = r.metadata?.labels || {};
+  return {
+    kind: l['trivy-operator.resource.kind'] || r.metadata?.ownerReferences?.[0]?.kind || '',
+    name: l['trivy-operator.resource.name'] || r.metadata?.ownerReferences?.[0]?.name || r.metadata?.name || '',
+    namespace: r.metadata?.namespace || '',
+    container: l['trivy-operator.container.name'] || '',
+  };
+};
+const sev = (s) => (s || 'UNKNOWN').toUpperCase();
+const emptySummary = () => ({ CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, UNKNOWN: 0 });
+const sevTotalOf = (s = {}) => (s.CRITICAL || 0) + (s.HIGH || 0) + (s.MEDIUM || 0) + (s.LOW || 0) + (s.UNKNOWN || 0);
+const addSummary = (into, s = {}) => {
+  into.CRITICAL += s.criticalCount || 0; into.HIGH += s.highCount || 0;
+  into.MEDIUM += s.mediumCount || 0; into.LOW += s.lowCount || 0; into.UNKNOWN += s.unknownCount || s.noneCount || 0;
+  return into;
+};
+
+app.get('/api/security/status', async (req, res) => {
+  if (!kubeConfig) return res.json({ installed: false });
+  try {
+    const api = kubeConfig.makeApiClient(k8s.ApiextensionsV1Api);
+    const { items } = await api.listCustomResourceDefinition();
+    const names = new Set(items.map((c) => c.metadata?.name));
+    const has = (n) => names.has(`${n}.${TRIVY_GROUP}`);
+    const installed = [...names].some((n) => n?.endsWith(`.${TRIVY_GROUP}`));
+    res.json({
+      installed,
+      reports: {
+        vulnerability: has('vulnerabilityreports'),
+        configAudit: has('configauditreports'),
+        rbac: has('rbacassessmentreports') || has('clusterrbacassessmentreports'),
+        exposedSecret: has('exposedsecretreports'),
+      },
+    });
+  } catch (e) {
+    res.json({ installed: false, error: firstLine(e.message) });
+  }
+});
+
+// Image vulnerability reports → grouped by image, with severity + CVE detail.
+app.get('/api/security/vulnerabilities', async (req, res) => {
+  try {
+    const items = await listTrivy('vulnerabilityreports');
+    if (items === null) return res.json({ installed: false, images: [], summary: emptySummary() });
+    const ns = req.query.namespace && req.query.namespace !== 'all' ? req.query.namespace : null;
+    const total = emptySummary();
+    const byImage = new Map();
+    for (const r of items) {
+      const owner = trivyOwner(r);
+      if (ns && owner.namespace !== ns) continue;
+      const rep = r.report || {};
+      const art = rep.artifact || {};
+      const reg = rep.registry?.server || '';
+      const image = `${reg ? reg + '/' : ''}${art.repository || '?'}${art.tag ? ':' + art.tag : (art.digest ? '@' + String(art.digest).slice(0, 19) : '')}`;
+      addSummary(total, rep.summary);
+      const scannedAt = rep.updateTimestamp || r.metadata?.creationTimestamp || '';
+      if (!byImage.has(image)) byImage.set(image, {
+        image, repository: art.repository || '', tag: art.tag || '',
+        digest: art.digest || '', registry: reg,
+        os: `${rep.os?.family || ''} ${rep.os?.name || ''}`.trim(),
+        namespace: owner.namespace, status: 'Scanned',
+        scanner: [rep.scanner?.name, rep.scanner?.version].filter(Boolean).join(' '),
+        scannedAt, summary: emptySummary(), workloads: [], vulnerabilities: [], secrets: 0, _seen: new Set(),
+      });
+      const g = byImage.get(image);
+      if (scannedAt > g.scannedAt) g.scannedAt = scannedAt;
+      addSummary(g.summary, rep.summary);
+      g.workloads.push({ kind: owner.kind, name: owner.name, namespace: owner.namespace, container: owner.container });
+      for (const v of (rep.vulnerabilities || [])) {
+        const key = v.vulnerabilityID + '|' + v.resource + '|' + v.installedVersion;
+        if (g._seen.has(key)) continue; g._seen.add(key);
+        g.vulnerabilities.push({
+          id: v.vulnerabilityID, severity: sev(v.severity), pkg: v.resource || '',
+          installedVersion: v.installedVersion || '', fixedVersion: v.fixedVersion || '',
+          title: v.title || '', link: v.primaryLink || (v.links || [])[0] || '', score: v.score,
+        });
+      }
+    }
+    // Merge exposed-secret counts (a separate Trivy Operator report) by image.
+    const secretItems = await listTrivy('exposedsecretreports');
+    for (const r of (secretItems || [])) {
+      const owner = trivyOwner(r);
+      if (ns && owner.namespace !== ns) continue;
+      const rep = r.report || {};
+      const art = rep.artifact || {};
+      const reg = rep.registry?.server || '';
+      const image = `${reg ? reg + '/' : ''}${art.repository || '?'}${art.tag ? ':' + art.tag : (art.digest ? '@' + String(art.digest).slice(0, 19) : '')}`;
+      const g = byImage.get(image);
+      if (g) g.secrets = (g.secrets || 0) + (rep.summary ? sevTotalOf({ CRITICAL: rep.summary.criticalCount, HIGH: rep.summary.highCount, MEDIUM: rep.summary.mediumCount, LOW: rep.summary.lowCount }) : (rep.secrets || []).length);
+    }
+
+    const order = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
+    const images = [...byImage.values()].map((g) => {
+      delete g._seen;
+      g.platform = g.platform || g.os;
+      g.criticalCount = g.summary.CRITICAL;
+      g.vulnerabilities.sort((a, b) => order[a.severity] - order[b.severity] || (b.score || 0) - (a.score || 0));
+      return g;
+    }).sort((a, b) => (b.summary.CRITICAL - a.summary.CRITICAL) || (b.summary.HIGH - a.summary.HIGH));
+    // Results donut: images with any finding vs clean.
+    const vulnerable = images.filter((g) => sevTotalOf(g.summary) > 0).length;
+    const results = { vulnerable, ok: images.length - vulnerable };
+    // Status donut: scanned vs not-scanned (best-effort pod count for the total).
+    const scanned = images.length;
+    let podCount = null;
+    try {
+      const pods = await kubeConfig.makeApiClient(k8s.CoreV1Api).listPodForAllNamespaces({ limit: 5000 });
+      podCount = (pods.items || []).length;
+    } catch { /* best-effort */ }
+    res.json({
+      installed: true, images, summary: total, reportCount: items.length,
+      results, scanned, notScanned: podCount != null ? Math.max(0, podCount - scanned) : null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: firstLine(e.message) });
+  }
+});
+
+// Config-audit (resource best-practice) + RBAC assessment reports. `kind` picks
+// which: 'config' (configauditreports) or 'rbac' (rbac + cluster rbac).
+app.get('/api/security/checks', async (req, res) => {
+  try {
+    const which = req.query.kind === 'rbac' ? 'rbac' : 'config';
+    let items;
+    if (which === 'config') {
+      items = await listTrivy('configauditreports');
+      if (items === null) return res.json({ installed: false, resources: [], summary: emptySummary() });
+    } else {
+      const nsR = await listTrivy('rbacassessmentreports');
+      const clR = await listTrivy('clusterrbacassessmentreports', { cluster: true });
+      if (nsR === null && clR === null) return res.json({ installed: false, resources: [], summary: emptySummary() });
+      items = [...(nsR || []), ...(clR || [])];
+    }
+    const ns = req.query.namespace && req.query.namespace !== 'all' ? req.query.namespace : null;
+    const total = emptySummary();
+    const order = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
+    const resources = [];
+    for (const r of items) {
+      const owner = trivyOwner(r);
+      if (ns && owner.namespace && owner.namespace !== ns) continue;
+      const rep = r.report || {};
+      addSummary(total, rep.summary);
+      const failed = (rep.checks || []).filter((c) => c.success === false).map((c) => ({
+        id: c.checkID || c.id || '', title: c.title || '', severity: sev(c.severity),
+        category: c.category || '', message: (c.messages || [])[0] || c.description || '', remediation: c.remediation || '',
+      })).sort((a, b) => order[a.severity] - order[b.severity]);
+      if (!failed.length) continue;
+      resources.push({
+        kind: owner.kind || 'Cluster', name: owner.name, namespace: owner.namespace,
+        createdAt: r.metadata?.creationTimestamp || '',
+        scannedAt: rep.updateTimestamp || r.metadata?.creationTimestamp || '',
+        scanner: [rep.scanner?.name, rep.scanner?.version].filter(Boolean).join(' '),
+        labels: Object.keys(r.metadata?.labels || {}).length,
+        summary: rep.summary && {
+          CRITICAL: rep.summary.criticalCount || 0, HIGH: rep.summary.highCount || 0, MEDIUM: rep.summary.mediumCount || 0, LOW: rep.summary.lowCount || 0, UNKNOWN: 0,
+        } || emptySummary(),
+        checks: failed,
+      });
+    }
+    resources.sort((a, b) => (b.summary.CRITICAL - a.summary.CRITICAL) || (b.summary.HIGH - a.summary.HIGH));
+    res.json({ installed: true, resources, summary: total, reportCount: items.length });
+  } catch (e) {
+    res.status(500).json({ error: firstLine(e.message) });
+  }
+});
+
+// ---- Built-in image scanning (bundled Trivy, no in-cluster operator) ----
+const scanResultShape = () => {
+  const s = trivyScan.scanState;
+  return {
+    running: s.running, done: s.done, phase: s.phase, total: s.total, scanned: s.scanned,
+    startedAt: s.startedAt, finishedAt: s.finishedAt, error: s.error,
+    installed: !!s.images, images: s.images || [], summary: s.summary,
+    results: s.results, scanned: s.scanned,
+    notScanned: s.total ? Math.max(0, s.total - s.scanned) : null,
+    source: 'trivy-builtin',
+  };
+};
+
+app.get('/api/security/scan/status', async (req, res) => {
+  const t = await trivyScan.trivyAvailable();
+  const s = trivyScan.scanState;
+  const hasResult = (s.context === currentContext && !!s.images) || !!trivyScan.loadScan(currentContext);
+  res.json({ ...t, running: s.running, done: s.done, hasResult });
+});
+
+app.post('/api/security/scan', async (req, res) => {
+  if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+  const t = await trivyScan.trivyAvailable();
+  if (!t.available && !t.installable) return res.status(400).json({ error: 'trivy is not available and cannot be auto-installed on this platform.' });
+  if (trivyScan.scanState.running) return res.json({ started: false, ...scanResultShape() });
+  try {
+    const pods = await kubeConfig.makeApiClient(k8s.CoreV1Api).listPodForAllNamespaces({ limit: 5000 });
+    const byImage = trivyScan.listClusterImages(pods.items || [], req.body?.namespace);
+    await trivyScan.startScan(byImage, currentContext);
+    res.json({ started: true, ...scanResultShape() });
+  } catch (e) {
+    res.status(500).json({ error: firstLine(e.message) });
+  }
+});
+
+app.get('/api/security/scan', (req, res) => {
+  const s = trivyScan.scanState;
+  // Live/in-memory scan for the current context wins; otherwise fall back to the
+  // persisted result for this cluster (survives an app restart / context switch).
+  if (s.context === currentContext && (s.images || s.running)) return res.json(scanResultShape());
+  const cached = trivyScan.loadScan(currentContext);
+  if (cached && cached.images?.length) {
+    return res.json({
+      installed: true, running: false, done: true, phase: 'done', cached: true, source: 'trivy-builtin',
+      images: cached.images, summary: cached.summary, results: cached.results,
+      scanned: cached.scanned, total: cached.total, notScanned: null, finishedAt: cached.finishedAt,
+    });
+  }
+  res.json(scanResultShape());
+});
+
 // Applications that aren't fully Synced+Healthy — the "Needs attention" panel.
 const needsAttention = (a) => a.syncStatus !== 'Synced' || (a.healthStatus !== 'Healthy' && a.healthStatus !== 'Unknown');
 
@@ -1949,7 +2470,7 @@ app.post('/api/argocd/application/:namespace/:name/sync', async (req, res) => {
     if (o.replace) syncOptions.push('Replace=true');
     if (o.force) syncOptions.push('Force=true');
     if (syncOptions.length) sync.syncOptions = syncOptions;
-    const patch = JSON.stringify({ operation: { initiatedBy: { username: 'k8s-manager-ui' }, sync } });
+    const patch = JSON.stringify({ operation: { initiatedBy: { username: 'k8sight' }, sync } });
     const out = await runKubectl(['patch', 'applications.argoproj.io', name, '-n', namespace, '--type', 'merge', '-p', patch]);
     cache.clear();
     res.json({ success: true, message: out || 'Sync triggered' });
@@ -2153,14 +2674,17 @@ app.get('/api/cluster/summary', async (req, res) => {
       return res.json(cachedData);
     }
 
-    // Kubernetes version
+    // Kubernetes version — read it in-process via the API server's /version
+    // endpoint instead of shelling out to `kubectl version`, which prints a
+    // "client/server version skew" warning when the local kubectl binary is more
+    // than one minor off the cluster, and needs a matching kubectl at all.
     let serverVersion = 'unknown';
     let platform = '';
     try {
-      const v = JSON.parse(execSync(`kubectl ${kctlStr()}version -o json`, { encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024, timeout: 8000 }));
-      serverVersion = v.serverVersion?.gitVersion || 'unknown';
-      platform = v.serverVersion?.platform || '';
-    } catch (e) { /* ignore */ }
+      const info = await kubeConfig.makeApiClient(k8s.VersionApi).getCode();
+      serverVersion = info.gitVersion || 'unknown';
+      platform = info.platform || '';
+    } catch (e) { /* version is best-effort */ }
 
     // Nodes (reuse existing helpers)
     const nodes = fetchNodesWithKubectl().map(formatNode);
@@ -2190,8 +2714,9 @@ app.get('/api/cluster/summary', async (req, res) => {
     const podPhases = { Running: 0, Pending: 0, Succeeded: 0, Failed: 0, Unknown: 0 };
     let podTotal = 0;
     try {
-      const out = execSync(
-        `kubectl get pods -A -o jsonpath='{range .items[*]}{.status.phase}{"\\n"}{end}'`,
+      const out = execFileSync(
+        'kubectl',
+        kctl('get', 'pods', '-A', '-o', 'jsonpath={range .items[*]}{.status.phase}{"\\n"}{end}'),
         { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, timeout: 12000 }
       );
       out.split('\n').filter(Boolean).forEach(p => {
@@ -2203,8 +2728,9 @@ app.get('/api/cluster/summary', async (req, res) => {
     // Namespace count
     let namespaceCount = 0;
     try {
-      const out = execSync(
-        `kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\\n"}{end}'`,
+      const out = execFileSync(
+        'kubectl',
+        kctl('get', 'ns', '-o', 'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}'),
         { encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024, timeout: 8000 }
       );
       namespaceCount = out.split('\n').filter(Boolean).length;
@@ -2248,7 +2774,7 @@ const parseCpuMilli = (s) => {
 };
 
 const fetchMetricsRaw = (path) => {
-  const out = execSync(`kubectl ${kctlStr()}get --raw "${path}"`, {
+  const out = execFileSync('kubectl', kctl('get', '--raw', path), {
     encoding: 'utf-8',
     maxBuffer: 30 * 1024 * 1024,
     timeout: 10000
@@ -2349,8 +2875,9 @@ app.get('/api/metrics/node/:name', async (req, res) => {
 
     let cpuCap = '0', memCap = '0', cpuAlloc = '0', memAlloc = '0';
     try {
-      const out = execSync(
-        `kubectl get node ${name} -o jsonpath='{.status.capacity.cpu}|{.status.capacity.memory}|{.status.allocatable.cpu}|{.status.allocatable.memory}'`,
+      const out = execFileSync(
+        'kubectl',
+        ['get', 'node', name, '-o', 'jsonpath={.status.capacity.cpu}|{.status.capacity.memory}|{.status.allocatable.cpu}|{.status.allocatable.memory}'],
         { encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024, timeout: 8000 }
       );
       [cpuCap, memCap, cpuAlloc, memAlloc] = out.split('|');
@@ -2764,7 +3291,7 @@ app.post('/mcp', async (req, res) => {
         onsessioninitialized: (id) => { mcpTransports[id] = transport; },
       });
       transport.onclose = () => { if (transport.sessionId) delete mcpTransports[transport.sessionId]; };
-      const mcp = createMcpServer({ version: getAppVersion() });
+      const mcp = createMcpServer({ version: getAppVersion(), allowWrite: mcpAllowWrite });
       await mcp.connect(transport);
     } else {
       return res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: no valid session id (send an initialize request first)' }, id: null });
@@ -2808,9 +3335,29 @@ registerAssistant(app, {
 // Interactive shell over WebSocket (real TTY via k8s exec)
 // ============================================================
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws/exec' });
+// WebSocket handshakes are NOT subject to CORS, so a malicious page could open
+// /ws/exec directly and get a shell in a pod. Reject cross-origin upgrades with
+// the same rule the REST guard uses (browsers always send Origin on WS
+// handshakes; non-browser clients that omit it are allowed).
+const wss = new WebSocketServer({
+  server,
+  path: '/ws/exec',
+  verifyClient: (info) => isAllowedOrigin(info.origin, info.req.headers.host),
+});
 
 wss.on('connection', async (browserWs, req) => {
+  // Demo mode: a scripted pseudo-terminal instead of a real pod exec.
+  if (demo.isDemo(currentContext)) {
+    const durl = new URL(req.url, 'http://localhost');
+    demo.shellSession(browserWs, {
+      agent: durl.searchParams.get('agent'),
+      namespace: durl.searchParams.get('namespace'),
+      pod: durl.searchParams.get('pod'),
+      container: durl.searchParams.get('container'),
+    });
+    return;
+  }
+
   if (!kubeConfig) {
     browserWs.close(1011, 'No kubeconfig loaded');
     return;
@@ -2863,10 +3410,14 @@ wss.on('connection', async (browserWs, req) => {
     const container = url.searchParams.get('container') || undefined;
     if (!namespace || !pod) { browserWs.close(1008, 'Missing namespace or pod'); return; }
     const args = kctl('exec', '-it', '-n', namespace, ...(container ? ['-c', container] : []), pod, '--', 'sh', '-c', 'exec $(command -v bash || command -v sh || echo /bin/sh)');
+    const kubectlBin = resolveBinSync('kubectl');
     try {
-      term = pty.spawn('kubectl', args, { name: 'xterm-256color', cols: 80, rows: 24, cwd: process.env.HOME || '/', env: process.env });
+      term = pty.spawn(kubectlBin, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd: process.env.HOME || '/', env: process.env });
     } catch (err) {
-      send(`\r\n\x1b[31mFailed to start shell: ${err.message}\x1b[0m\r\n`);
+      const hint = kubectlBin === 'kubectl'
+        ? ' (kubectl was not found — install it or add it to PATH)'
+        : '';
+      send(`\r\n\x1b[31mFailed to start shell: ${err.message}${hint}\x1b[0m\r\n`);
       browserWs.close();
       return;
     }
@@ -2910,6 +3461,11 @@ const handleServerError = (err) => {
 server.on('error', handleServerError);
 wss.on('error', handleServerError);
 
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+// Bind to loopback by default so the API/exec surface is not reachable from
+// other hosts on the LAN. Set HOST=0.0.0.0 to expose it (the Docker image does
+// this so its published port works); prefer `-p 127.0.0.1:8080:3001` there.
+const HOST = process.env.HOST || '127.0.0.1';
+server.listen(PORT, HOST, () => {
+  const shown = HOST === '0.0.0.0' ? 'localhost' : HOST;
+  console.log(`Server running on http://${shown}:${PORT}${HOST === '0.0.0.0' ? ' (bound 0.0.0.0)' : ''}`);
 });

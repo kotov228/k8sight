@@ -1,14 +1,23 @@
 name: Build & Release
 
 # Build the k8sight desktop app for macOS, Windows and Linux in parallel, then
-# attach the installers to a GitHub Release. Push a version tag (e.g. v1.4.0)
-# to build AND publish a release; run manually from the Actions tab to just
-# produce the build artifacts without publishing.
+# create a GitHub Release with the installers attached. You never create the
+# release by hand — the workflow builds first and publishes for you. Trigger it
+# either way:
+#   * push a version tag (e.g. `git push origin v1.4.1`), or
+#   * Actions -> Build & Release -> Run workflow on `main`; the version is read
+#     from the repo's VERSION file, so it tags `v<VERSION>` and releases at the
+#     current commit. (Optionally override with the `version` input.)
 on:
   push:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional tag override (e.g. v1.4.2). Leave empty to use the VERSION file.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -46,7 +55,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -58,6 +67,10 @@ jobs:
       - name: Install client dependencies
         run: npm ci --prefix client
 
+      # Gate the release on the test suite — never ship a build whose tests fail.
+      - name: Run tests
+        run: npm test
+
       - name: Build & package
         # `npm run dist` runs the client build then electron-builder for the
         # host OS. --publish never keeps electron-builder from uploading; the
@@ -65,6 +78,23 @@ jobs:
         run: npm run dist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- macOS code signing + notarization (ignored on Windows/Linux) ---
+          # electron-builder imports the base64-encoded Developer ID .p12 from
+          # CSC_LINK into a temporary keychain and signs with the Hardened
+          # Runtime entitlements in build/. If these secrets are unset the mac
+          # build stays unsigned (a warning, not a failure), so the pipeline
+          # keeps working until they're configured. Required repo secrets:
+          #   MAC_CSC_LINK               base64 of the Developer ID .p12
+          #   MAC_CSC_KEY_PASSWORD       password for that .p12
+          #   APPLE_ID                   Apple ID email (notarization)
+          #   APPLE_APP_SPECIFIC_PASSWORD  app-specific password
+          #   APPLE_TEAM_ID              10-char Developer Team ID
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # Consumed by electron/notarize.cjs (afterSign hook).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -74,7 +104,6 @@ jobs:
           retention-days: 7
           path: |
             release/*.dmg
-            release/*.zip
             release/*.exe
             release/*.AppImage
             release/*.deb
@@ -84,9 +113,31 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    # Only publish for tag pushes; manual runs stop after producing artifacts.
-    if: startsWith(github.ref, 'refs/tags/')
+    # Manual approval gate: this job targets the `release` environment, which has
+    # required reviewers. After every platform builds, the workflow PAUSES here
+    # until a reviewer approves it in the Actions run — then it publishes.
+    # (Configure reviewers in Settings → Environments → release.)
+    environment: release
+    # Publish for a pushed tag, or any manual run (version from the VERSION file).
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"                 # tag push: reuse it
+          elif [ -n "${{ inputs.version }}" ]; then
+            TAG="${{ inputs.version }}"                  # manual override
+          else
+            TAG="v$(tr -d ' \t\r\n' < VERSION)"          # from the VERSION file
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -96,12 +147,14 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          # Reuse a pushed tag; otherwise create this tag + release at this commit.
+          tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             dist/*.dmg
-            dist/*.zip
             dist/*.exe
             dist/*.AppImage
             dist/*.deb

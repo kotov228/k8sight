@@ -85,7 +85,9 @@ export default function Helm() {
     try {
       return hljs.highlight(yamlContent, { language: 'yaml' }).value;
     } catch (err) {
-      return yamlContent;
+      // Escape on the error path — this feeds dangerouslySetInnerHTML and the
+      // YAML can contain arbitrary cluster-supplied strings (XSS otherwise).
+      return String(yamlContent).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
     }
   };
 
@@ -99,11 +101,7 @@ export default function Helm() {
           </h3>
           <span className="resource-count">{releases.length} items</span>
         </div>
-        <div className="resource-controls">
-          <button className="cluster-refresh-btn" onClick={fetchReleases} disabled={loading}>
-            <Icon name="refresh" size={14} /> Refresh
-          </button>
-        </div>
+        <div className="resource-controls" />
       </div>
 
       <div className="resource-table-wrapper">

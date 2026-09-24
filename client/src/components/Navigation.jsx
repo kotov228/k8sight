@@ -16,8 +16,11 @@ export default function Navigation({
   argocdInstalled,
   argoView,
   onSelectArgoView,
+  securityView,
+  onSelectSecurityView,
   onAddAzure,
   onAddAws,
+  onAddLocal,
   onOpenPreferences
 }) {
   // Route context changes through the app-level switch so the new cluster's
@@ -67,6 +70,14 @@ export default function Navigation({
     { key: 'events', label: 'Events', icon: 'events' },
     { key: 'helm', label: 'Helm', icon: 'helm' },
     { key: 'accessControl', label: 'Access Control', icon: 'accessControl' },
+  ];
+
+  // Security Center sub-views — mirror the tabs inside the Security view.
+  const securityTypes = [
+    { key: 'overview', label: 'Overview', icon: 'overview' },
+    { key: 'images', label: 'Images', icon: 'box' },
+    { key: 'resources', label: 'Resources', icon: 'configuration' },
+    { key: 'roles', label: 'Roles', icon: 'accessControl' },
   ];
 
   // ArgoCD sub-views — these mirror the tabs inside the ArgoCD view and only
@@ -140,6 +151,7 @@ export default function Navigation({
           onChange={handleContextChange}
           onAddAzure={onAddAzure}
           onAddAws={onAddAws}
+          onAddLocal={onAddLocal}
         />
       </div>
 
@@ -223,6 +235,31 @@ export default function Navigation({
             )}
           </div>
         )}
+
+        <div className="nav-section">
+          <div className="nav-section-title" onClick={() => onToggleNav('security')}>
+            <span className={`nav-section-chevron ${navExpanded.security ? 'open' : ''}`}>
+              <Icon name="chevronRight" size={13} strokeWidth={2.2} />
+            </span>
+            <Icon name="shield" size={15} className="nav-lead-icon" />
+            Security Center
+          </div>
+          {navExpanded.security && (
+            <div className="nav-items">
+              {securityTypes.map((type) => (
+                <div
+                  key={type.key}
+                  className={`nav-item ${resourceType === 'security' && securityView === type.key ? 'active' : ''}`}
+                  onClick={() => onSelectSecurityView(type.key)}
+                  title={type.label}
+                >
+                  <Icon name={type.icon} size={15} className="nav-lead-icon" />
+                  {type.label}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <CustomResourceTree selection={crSelection} onSelect={onSelectCustomResource} />
       </div>

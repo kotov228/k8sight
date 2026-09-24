@@ -6,7 +6,7 @@ import {
   getAiConfig, setAiConfig, getAiExternalTerminal, setAiExternalTerminal,
 } from '../aiConfig';
 
-// Full-page Preferences view (Lens-style): a left sub-nav of sections and a
+// Full-page Preferences view: a left sub-nav of sections and a
 // content pane. Sections: General, Kubernetes, Cloud Integrations, External
 // Tools (bring-your-own AI agent), AI Assistant, About.
 
@@ -16,6 +16,7 @@ const SECTIONS = [
   { key: 'integrations', label: 'Cloud Integrations', icon: 'hexagon' },
   { key: 'external-tools', label: 'External Tools', icon: 'sparkles' },
   { key: 'assistant', label: 'AI Assistant', icon: 'send' },
+  { key: 'mcp', label: 'MCP Server', icon: 'terminal' },
   { key: 'about', label: 'About', icon: 'details' },
 ];
 
@@ -52,6 +53,7 @@ export default function Preferences({ configStatus, theme, onSetTheme, onChangeC
         {section === 'integrations' && <IntegrationsSection onAddAzure={onAddAzure} onAddAws={onAddAws} />}
         {section === 'external-tools' && <ExternalToolsSection />}
         {section === 'assistant' && <AssistantSection />}
+        {section === 'mcp' && <McpSection />}
         {section === 'about' && <AboutSection configStatus={configStatus} />}
       </div>
     </div>
@@ -284,13 +286,141 @@ function AssistantSection() {
 }
 
 /* ── About ───────────────────────────────────────────────────────── */
+// Small copy-to-clipboard button that flips to a check for a moment.
+function CopyBtn({ text }) {
+  const [ok, setOk] = useState(false);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); setOk(true); setTimeout(() => setOk(false), 1500); } catch (e) {}
+  };
+  return (
+    <button className="prefs-btn" onClick={copy} title="Copy" aria-label="Copy">
+      <Icon name={ok ? 'check' : 'copy'} size={14} /> {ok ? 'Copied' : 'Copy'}
+    </button>
+  );
+}
+
+// A labelled, copyable code block.
+function CopyField({ label, hint, value }) {
+  return (
+    <Field label={label} hint={hint}>
+      <div className="prefs-inline">
+        <code className="prefs-code" style={{ flex: 1, overflowX: 'auto', whiteSpace: 'pre' }}>{value}</code>
+        <CopyBtn text={value} />
+      </div>
+    </Field>
+  );
+}
+
+function McpSection() {
+  const host = (typeof window !== 'undefined' && window.location.hostname) || 'localhost';
+  const endpoint = `http://${host}:3001/mcp`;
+  const [info, setInfo] = useState(null);
+  const [test, setTest] = useState({ state: 'idle' }); // idle | testing | ok | fail
+
+  useEffect(() => {
+    axios.get('/api/mcp/info').then((r) => setInfo(r.data)).catch(() => setInfo({ allowWrite: false, readTools: [], writeTools: [] }));
+  }, []);
+
+  const testConnection = async () => {
+    setTest({ state: 'testing' });
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'k8sight-prefs', version: '1.0' } } }),
+      });
+      const sid = res.headers.get('mcp-session-id');
+      if (res.ok && sid) {
+        setTest({ state: 'ok' });
+        // Politely end the probe session.
+        fetch(endpoint, { method: 'DELETE', headers: { 'mcp-session-id': sid } }).catch(() => {});
+      } else {
+        setTest({ state: 'fail', msg: `HTTP ${res.status}` });
+      }
+    } catch (e) {
+      setTest({ state: 'fail', msg: e.message });
+    }
+  };
+
+  const setWrite = async (allowWrite) => {
+    setInfo((p) => ({ ...(p || {}), allowWrite })); // optimistic
+    try {
+      const { data } = await axios.post('/api/mcp/config', { allowWrite });
+      setInfo((p) => ({ ...(p || {}), allowWrite: data.allowWrite }));
+    } catch (e) {
+      // revert on failure
+      axios.get('/api/mcp/info').then((r) => setInfo(r.data)).catch(() => {});
+    }
+  };
+
+  const claudeCmd = `claude mcp add --transport http k8sight ${endpoint}`;
+  const clientJson = `{
+  "mcpServers": {
+    "k8sight": { "url": "${endpoint}" }
+  }
+}`;
+
+  return (
+    <div className="prefs-section">
+      <h2 className="prefs-h2">MCP Server</h2>
+      <p className="prefs-lead">
+        k8sight is a <a className="prefs-link" href="https://modelcontextprotocol.io" target="_blank" rel="noopener">Model Context Protocol</a> server,
+        so any MCP-compatible agent (Claude Code, Claude Desktop, Cursor…) can inspect and operate the
+        <strong> currently selected cluster</strong>. The server runs while the app is open.
+      </p>
+
+      <CopyField label="HTTP endpoint" hint="Streamable HTTP transport — recommended." value={endpoint} />
+
+      <CopyField label="Add to Claude Code" hint="Run this in your terminal." value={claudeCmd} />
+
+      <CopyField label="MCP client config (Cursor / .mcp.json)" hint="For clients that take a JSON config." value={clientJson} />
+
+      <Field label="Connection">
+        <div className="prefs-inline">
+          <button className="prefs-btn primary" onClick={testConnection} disabled={test.state === 'testing'}>
+            {test.state === 'testing' ? 'Testing…' : 'Test connection'}
+          </button>
+          {test.state === 'ok' && <span className="prefs-muted" style={{ color: 'var(--green, #34c759)' }}><Icon name="check" size={14} /> Connected</span>}
+          {test.state === 'fail' && <span className="prefs-muted" style={{ color: 'var(--red, #ff3b30)' }}>Failed: {test.msg}</span>}
+        </div>
+      </Field>
+
+      <Field label="Write access" hint="Read-only is safest. Enabling lets agents apply, delete, scale and sync — mutating your cluster.">
+        {info == null ? <span className="prefs-muted">…</span> : (
+          <div className="prefs-stack">
+            <div className="prefs-seg">
+              <button className={`prefs-seg-btn ${!info.allowWrite ? 'active' : ''}`} onClick={() => setWrite(false)}>Read-only</button>
+              <button className={`prefs-seg-btn ${info.allowWrite ? 'active' : ''}`} onClick={() => setWrite(true)}>Read &amp; write</button>
+            </div>
+            <div className={`prefs-status ${info.allowWrite ? 'warn' : 'ok'}`}>
+              <span className="prefs-status-dot" />
+              {info.allowWrite
+                ? 'Write tools exposed — reconnect your agent to pick them up.'
+                : 'Only read tools are exposed.'}
+            </div>
+          </div>
+        )}
+      </Field>
+
+      {info && (
+        <Field label="Available tools">
+          <div className="prefs-mcp-tools">
+            {info.readTools.map((t) => <span key={t} className="prefs-chip">{t}</span>)}
+            {info.allowWrite && info.writeTools.map((t) => <span key={t} className="prefs-chip write">{t}</span>)}
+          </div>
+        </Field>
+      )}
+    </div>
+  );
+}
+
 function AboutSection({ configStatus }) {
   const version = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '';
   return (
     <div className="prefs-section">
       <h2 className="prefs-h2">About</h2>
       <Field label="k8sight">{version ? <span className="prefs-muted">Version {version}</span> : null}</Field>
-      <p className="prefs-lead">A Lens-style Kubernetes management app — cluster overview, resources, topology, ArgoCD, one-click AKS/EKS, terminals and bring-your-own AI agents.</p>
+      <p className="prefs-lead">A native Kubernetes management app — cluster overview, resources, topology, ArgoCD, one-click AKS/EKS, terminals and bring-your-own AI agents.</p>
     </div>
   );
 }

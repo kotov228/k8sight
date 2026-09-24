@@ -1,7 +1,7 @@
 {
-  "name": "k8s-manager-ui",
-  "version": "1.4.1",
-  "description": "Kubernetes resource manager UI",
+  "name": "k8sight",
+  "version": "1.5.1",
+  "description": "A native desktop UI for browsing and operating Kubernetes clusters",
   "author": {
     "name": "Praveen Kumar",
     "email": "praveensinghraghav96@gmail.com"
@@ -15,17 +15,22 @@
     "server": "node server.js",
     "client": "cd client && npm run dev",
     "version:sync": "node scripts/sync-version.mjs",
+    "fetch:trivy": "node scripts/fetch-trivy.mjs",
+    "postinstall": "node scripts/fix-pty-helper.mjs",
+    "test": "node --test \"test/**/*.test.mjs\"",
     "build": "npm run version:sync && cd client && npm run build",
     "start": "node server.js",
     "app": "electron .",
-    "app:pack": "npm run build && electron-builder --dir --mac",
-    "app:dist": "npm run build && electron-builder --mac",
-    "dist": "npm run build && electron-builder --publish never",
+    "app:pack": "npm run fetch:trivy && npm run build && electron-builder --dir --mac",
+    "app:dist": "npm run fetch:trivy && npm run build && electron-builder --mac",
+    "dist": "npm run fetch:trivy && npm run build && electron-builder --publish never",
     "mcp": "node mcp-stdio.js"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
-    "@aws-sdk/client-ec2": "^3.1127.0",
     "@aws-sdk/client-eks": "^3.1127.0",
     "@aws-sdk/client-sso": "^3.1127.0",
     "@aws-sdk/client-sso-oidc": "^3.1127.0",
@@ -39,12 +44,14 @@
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "express-rate-limit": "^8.7.0",
     "js-yaml": "^4.1.0",
     "node-pty": "^1.1.0",
     "ws": "^8.21.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
     "concurrently": "^8.2.0",
     "electron": "^44.0.0",
     "electron-builder": "^26.15.3"
@@ -52,11 +59,9 @@
   "build": {
     "appId": "com.k8sight.desktop",
     "productName": "k8sight",
-    "asar": true,
-    "asarUnpack": [
-      "**/*.node"
-    ],
+    "asar": false,
     "afterPack": "electron/after-pack.cjs",
+    "afterSign": "electron/notarize.cjs",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -64,14 +69,34 @@
     "files": [
       "electron/**/*",
       "*.js",
+      "lib/**/*",
+      "VERSION",
       "package.json",
-      "client/dist/**/*"
+      "client/dist/**/*",
+      "!**/*.d.ts",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.markdown",
+      "!**/{test,tests,__tests__,__mocks__,example,examples,docs,doc,.github,.vscode,.idea}/**"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin",
+        "filter": [
+          "trivy*"
+        ]
+      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
-      "identity": null,
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "notarize": false,
+      "artifactName": "${productName}-macos.${ext}",
       "target": [
         {
           "target": "dmg",
@@ -88,7 +113,11 @@
       "category": "Development",
       "icon": "build/icon.png",
       "synopsis": "A desktop UI for browsing and operating Kubernetes clusters",
+      "description": "k8sight is a native desktop app for browsing and operating any Kubernetes cluster from your local kubeconfig — live dashboards, logs, an in-pod shell, topology, Helm, Argo CD, a Security Center and one-click EKS/AKS onboarding.",
+      "maintainer": "Praveen Kumar <praveensinghraghav96@gmail.com>",
+      "vendor": "Praveen Kumar",
       "syncDesktopName": true,
+      "artifactName": "${productName}-linux.${ext}",
       "target": [
         "AppImage",
         "deb"
@@ -96,8 +125,21 @@
     },
     "win": {
       "icon": "build/icon.png",
+      "artifactName": "${productName}-windows.${ext}",
       "target": [
         "nsis"
+      ]
+    },
+    "nsis": {
+      "shortcutName": "k8sight",
+      "uninstallDisplayName": "k8sight"
+    },
+    "deb": {
+      "fpm": [
+        "--replaces",
+        "k8s-manager-ui",
+        "--conflicts",
+        "k8s-manager-ui"
       ]
     }
   }
