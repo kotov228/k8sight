@@ -18,7 +18,7 @@
     "fetch:trivy": "node scripts/fetch-trivy.mjs",
     "postinstall": "node scripts/fix-pty-helper.mjs",
     "test": "node --test \"test/**/*.test.mjs\"",
-    "build": "npm run version:sync && cd client && npm run build",
+    "build": "node scripts/write-gke-oauth.mjs && npm run version:sync && cd client && npm run build",
     "start": "node server.js",
     "app": "electron .",
     "app:pack": "npm run fetch:trivy && npm run build && electron-builder --dir --mac",
@@ -69,6 +69,7 @@
     "files": [
       "electron/**/*",
       "*.js",
+      "gke-oauth.json",
       "lib/**/*",
       "VERSION",
       "package.json",
