@@ -299,6 +299,11 @@ app.get('/api/mcp/info', (req, res) => {
 // Toggle MCP write tools from the UI (persisted). Takes effect for new MCP
 // sessions — a connected agent must reconnect to pick up the new tool set.
 app.post('/api/mcp/config', (req, res) => {
+  const remoteAddr = req.socket.remoteAddress || '';
+  const isLocalRequest = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteAddr);
+  if (!isLocalRequest) {
+    return res.status(403).json({ error: 'This endpoint is only accessible from localhost' });
+  }
   const { allowWrite } = req.body || {};
   if (typeof allowWrite !== 'boolean') {
     return res.status(400).json({ error: 'allowWrite (boolean) is required' });
