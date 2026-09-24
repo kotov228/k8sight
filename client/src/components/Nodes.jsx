@@ -7,6 +7,8 @@ import Loader from './Loader';
 
 const fmtCpuM = (m) => (m >= 1000 ? `${(m / 1000).toFixed(2)} cores` : `${Math.round(m)}m`);
 const fmtGi = (gi) => `${gi.toFixed(1)} Gi`;
+const fmtCpuValue = (m) => (m == null ? '—' : fmtCpuM(m));
+const fmtMemValue = (bytes) => (bytes == null ? '—' : fmtGi(bytes / 1024 ** 3));
 
 const formatAge = (createdAt) => {
   if (!createdAt) return '-';
@@ -77,21 +79,23 @@ export default function Nodes({ focusNode, onFocusHandled, onNavigate, refreshSi
     setNmemHist([]);
     setNMetricsNow(null);
     setNMetricsAvail(true);
+    let pollTimer;
     const poll = async () => {
       try {
-        const res = await axios.get(`/api/metrics/node/${selectedNodeName}`);
+        const res = await axios.get(`/api/metrics/node/${encodeURIComponent(selectedNodeName)}`);
         if (!active) return;
-        if (res.data?.available === false) { setNMetricsAvail(false); return; }
         setNMetricsNow(res.data);
-        setNcpuHist(h => [...h, res.data.cpuMilli].slice(-40));
-        setNmemHist(h => [...h, res.data.memBytes].slice(-40));
+        setNMetricsAvail(res.data?.available !== false);
+        if (Number.isFinite(res.data?.cpuMilli)) setNcpuHist(h => [...h, res.data.cpuMilli].slice(-40));
+        if (Number.isFinite(res.data?.memBytes)) setNmemHist(h => [...h, res.data.memBytes].slice(-40));
       } catch (e) {
         if (active) setNMetricsAvail(false);
+      } finally {
+        if (active) pollTimer = setTimeout(poll, 3000);
       }
     };
     poll();
-    const iv = setInterval(poll, 3000);
-    return () => { active = false; clearInterval(iv); };
+    return () => { active = false; clearTimeout(pollTimer); };
   }, [selectedNodeName]);
 
   useEffect(() => {
@@ -253,7 +257,32 @@ export default function Nodes({ focusNode, onFocusHandled, onNavigate, refreshSi
               <div className="details-tab-content">
                 <div className="cluster-info-container" style={{ padding: '16px' }}>
                   <div className="cluster-info-card" style={{ gridColumn: '1 / -1' }}>
-                    <h3><Icon name="activity" size={15} /> Resource Usage</h3>
+                    <h3>
+                      <Icon name="activity" size={15} /> Requests, Limits & Usage
+                      {nMetricsNow?.source && <span className="resource-metric-source">{nMetricsNow.source}{nMetricsNow.refreshing ? ' · refreshing' : nMetricsNow.stale ? ' · last known' : ''}</span>}
+                    </h3>
+                    <table className="resource-usage-table node-resource-usage-table">
+                      <thead><tr><th>Resource</th><th>Requests</th><th>Limits (declared sum)</th><th>Usage</th></tr></thead>
+                      <tbody>
+                        <tr>
+                          <th>CPU</th>
+                          <td>{fmtCpuValue(nMetricsNow?.cpuRequestsMilli)}</td>
+                          <td>{fmtCpuValue(nMetricsNow?.cpuLimitsMilli)}</td>
+                          <td>{fmtCpuValue(nMetricsNow?.cpuMilli)}</td>
+                        </tr>
+                        <tr>
+                          <th>Memory</th>
+                          <td>{fmtMemValue(nMetricsNow?.memRequestsBytes)}</td>
+                          <td>{fmtMemValue(nMetricsNow?.memLimitsBytes)}</td>
+                          <td>{fmtMemValue(nMetricsNow?.memBytes)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    {nMetricsNow?.scheduledPods != null && (
+                      <p className="node-resource-usage-note">
+                        Requests and limits are summed from {nMetricsNow.scheduledPods} scheduled pods. Limits include only values declared by pods.
+                      </p>
+                    )}
                     {!nMetricsAvail ? (
                       <div className="drawer-dim">Metrics not available</div>
                     ) : (

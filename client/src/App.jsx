@@ -19,6 +19,7 @@ import KubeConfigModal from './components/KubeConfigModal';
 import AuthErrorModal from './components/AuthErrorModal';
 import AccessControl from './components/AccessControl';
 import SecurityCenter from './components/SecurityCenter';
+import CostsCenter from './components/CostsCenter';
 import ArgoCD from './components/ArgoCD';
 import Assistant from './components/Assistant';
 import AgentPanel from './components/AgentPanel';
@@ -30,7 +31,7 @@ import { useToast } from './components/Toast';
 
 // Views that load their own data and should NOT trigger the shared resource fetch.
 // (Overview is intentionally excluded — its dashboard is built from the shared fetch.)
-const STANDALONE_RESOURCE_TYPES = ['cluster', 'nodes', 'namespaces', 'helm', 'customResources', 'accessControl', 'topology', 'argocd', 'security'];
+const STANDALONE_RESOURCE_TYPES = ['cluster', 'nodes', 'namespaces', 'helm', 'customResources', 'accessControl', 'topology', 'argocd', 'security', 'costs'];
 
 // Maps a resourceType to the key it lives under in allResources.
 // Naive `type + 's'` breaks for a few types.
@@ -72,6 +73,7 @@ function App() {
   const [argocdInstalled, setArgocdInstalled] = useState(false);
   const handleRefreshRef = useRef(() => {});
   const refreshInFlight = useRef(false);
+  const resourceQueryDepsRef = useRef(null);
 
   useEffect(() => { localStorage.setItem('refreshInterval', refreshInterval); }, [refreshInterval]);
 
@@ -96,12 +98,15 @@ function App() {
     config: false,
     argocd: false,
     argocdSettings: false,
-    security: false
+    security: false,
+    costs: false
   });
   // Which ArgoCD sub-view the sidebar is pointing at (dashboard/applications/…).
   const [argoView, setArgoView] = useState('dashboard');
   // Which Security Center sub-view the sidebar is pointing at.
   const [securityView, setSecurityView] = useState('overview');
+  // Which Cost Center sub-view the sidebar is pointing at.
+  const [costsView, setCostsView] = useState('overview');
   const [showAzure, setShowAzure] = useState(false);
   // When the failing cluster uses kubelogin/azurecli, the fix is `az login` (the
   // browser OAuth flow doesn't refresh the CLI token that kubelogin reads), so
@@ -147,7 +152,16 @@ function App() {
 
   useEffect(() => {
     if (authOk && !STANDALONE_RESOURCE_TYPES.includes(resourceType)) {
-      fetchResources();
+      const previous = resourceQueryDepsRef.current;
+      const namespaceOnlyChange = Boolean(previous
+        && previous.resourceType === resourceType
+        && previous.selectedNamespaces === selectedNamespaces
+        && previous.authOk === authOk
+        && previous.namespaces !== namespaces);
+      resourceQueryDepsRef.current = { resourceType, selectedNamespaces, authOk, namespaces };
+      fetchResources({ silent: namespaceOnlyChange });
+    } else {
+      resourceQueryDepsRef.current = { resourceType, selectedNamespaces, authOk, namespaces };
     }
   }, [selectedNamespaces, resourceType, authOk, namespaces]);
 
@@ -267,8 +281,11 @@ function App() {
     refreshInFlight.current = true;
     if (!silent) setRefreshing(true);
     try {
-      if (!STANDALONE_RESOURCE_TYPES.includes(resourceType)) {
-        await fetchNamespaces();
+      const refreshedNamespaces = await fetchNamespaces({ silent });
+      const namespaceListChanged = refreshedNamespaces
+        && (refreshedNamespaces.length !== namespaces.length
+          || refreshedNamespaces.some((name, index) => name !== namespaces[index]));
+      if (!STANDALONE_RESOURCE_TYPES.includes(resourceType) && !namespaceListChanged) {
         await fetchResources({ silent });
       }
       setRefreshNonce(n => n + 1);
@@ -334,18 +351,31 @@ function App() {
     }
   };
 
-  const fetchNamespaces = async () => {
+  const fetchNamespaces = async ({ silent = false } = {}) => {
     try {
       const response = await axios.get('/api/namespaces');
-      setNamespaces(['all', ...response.data.namespaces]);
+      const next = ['all', ...response.data.namespaces];
+      setNamespaces((previous) => previous.length === next.length
+        && previous.every((name, index) => name === next[index]) ? previous : next);
+      return next;
     } catch (err) {
-      toast.error('Failed to fetch namespaces', { title: 'Namespaces' });
+      if (!silent) toast.error('Failed to fetch namespaces', { title: 'Namespaces' });
+      return null;
     }
   };
 
-  const resolveNamespaces = () => {
+  const handleNamespaceDeleted = (deletedNamespace) => {
+    setSelectedNamespaces((current) => {
+      if (current.includes('all')) return current;
+      const remaining = current.filter((namespace) => namespace !== deletedNamespace);
+      return remaining.length ? remaining : ['all'];
+    });
+    fetchNamespaces({ silent: true });
+  };
+
+  const resolveNamespaces = (availableNamespaces = namespaces) => {
     if (selectedNamespaces.includes('all') || selectedNamespaces.length === 0) {
-      return namespaces.filter(n => n !== 'all');
+      return availableNamespaces.filter(n => n !== 'all');
     }
     return selectedNamespaces;
   };
@@ -366,6 +396,7 @@ function App() {
 
       const namespacesToFetch = resolveNamespaces();
       const allData = {};
+      const failedNamespaces = new Set();
 
       // Fetch namespaces in parallel with a bounded concurrency pool.
       // The backend now uses in-process API calls (no process spawn), so we
@@ -386,6 +417,7 @@ function App() {
             });
           } catch (e) {
             // Skip a namespace that fails (e.g. RBAC) rather than failing all
+            if (silent) failedNamespaces.add(ns);
           }
         }
       };
@@ -395,9 +427,15 @@ function App() {
       );
 
       if (fetchId !== fetchIdRef.current) return;
+      if (silent && failedNamespaces.size) {
+        for (const [key, rows] of Object.entries(allResources)) {
+          const staleRows = rows.filter((row) => failedNamespaces.has(row.namespace));
+          if (staleRows.length) allData[key] = [...(allData[key] || []), ...staleRows];
+        }
+      }
       setAllResources(allData);
     } catch (err) {
-      if (fetchId === fetchIdRef.current) toast.error('Failed to fetch resources', { title: 'Resources' });
+      if (fetchId === fetchIdRef.current && !silent) toast.error('Failed to fetch resources', { title: 'Resources' });
     } finally {
       if (fetchId === fetchIdRef.current) setLoading(false);
     }
@@ -582,6 +620,8 @@ function App() {
             onSelectArgoView={(v) => { setArgoView(v); setResourceType('argocd'); }}
             securityView={resourceType === 'security' ? securityView : null}
             onSelectSecurityView={(v) => { setSecurityView(v); setResourceType('security'); }}
+            costsView={resourceType === 'costs' ? costsView : null}
+            onSelectCostsView={(v) => { setCostsView(v); setResourceType('costs'); }}
             onAddAzure={() => openAzure()}
             onAddAws={() => setShowAws(true)}
             onAddGke={() => setShowGke(true)}
@@ -604,7 +644,7 @@ function App() {
           ) : resourceType === 'nodes' ? (
             <Nodes focusNode={focusNode} onFocusHandled={() => setFocusNode(null)} onNavigate={nav} refreshSignal={refreshNonce} />
           ) : resourceType === 'namespaces' ? (
-            <Namespaces onNavigate={nav} refreshSignal={refreshNonce} />
+            <Namespaces onNavigate={nav} onNamespaceDeleted={handleNamespaceDeleted} refreshSignal={refreshNonce} />
           ) : resourceType === 'topology' ? (
             <Topology namespaces={namespaces} refreshSignal={refreshNonce} />
           ) : resourceType === 'helm' ? (
@@ -615,6 +655,8 @@ function App() {
             <AccessControl onNavigate={nav} refreshSignal={refreshNonce} />
           ) : resourceType === 'security' ? (
             <SecurityCenter namespaces={namespaces} onNavigate={nav} view={securityView} onViewChange={setSecurityView} refreshSignal={refreshNonce} />
+          ) : resourceType === 'costs' ? (
+            <CostsCenter key={`costs-${configStatus.currentContext}`} context={configStatus.currentContext} refreshSignal={refreshNonce} view={costsView} onViewChange={setCostsView} />
           ) : resourceType === 'argocd' ? (
             <ArgoCD onNavigate={nav} refreshSignal={refreshNonce} view={argoView} onViewChange={setArgoView} />
           ) : resourceType === 'preferences' ? (
