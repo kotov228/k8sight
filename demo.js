@@ -1073,6 +1073,19 @@ function reconcileWorkloadPods(nsName, kind, name, replicas) {
   }
 }
 
+// A small canned Artifact Hub result set so the chart search/install flow is
+// fully explorable in demo mode (no network call to artifacthub.io).
+const DEMO_CHARTS = [
+  { id: 'bitnami/nginx', name: 'nginx', displayName: 'NGINX', version: '18.2.0', appVersion: '1.27.3', description: 'NGINX Open Source web server, reverse proxy and load balancer.', logo: null, stars: 106, deprecated: false, repository: { name: 'bitnami', url: 'https://charts.bitnami.com/bitnami', official: true, verified: true } },
+  { id: 'prometheus-community/kube-prometheus-stack', name: 'kube-prometheus-stack', displayName: 'Kube Prometheus Stack', version: '65.1.0', appVersion: 'v0.77.1', description: 'Prometheus, Grafana and Alertmanager preconfigured for Kubernetes monitoring.', logo: null, stars: 512, deprecated: false, repository: { name: 'prometheus-community', url: 'https://prometheus-community.github.io/helm-charts', official: false, verified: true } },
+  { id: 'grafana/grafana', name: 'grafana', displayName: 'Grafana', version: '8.5.1', appVersion: '11.3.0', description: 'The open observability platform for dashboards and visualization.', logo: null, stars: 287, deprecated: false, repository: { name: 'grafana', url: 'https://grafana.github.io/helm-charts', official: false, verified: true } },
+  { id: 'ingress-nginx/ingress-nginx', name: 'ingress-nginx', displayName: 'Ingress NGINX', version: '4.11.3', appVersion: '1.11.3', description: 'Ingress controller for Kubernetes using NGINX as a reverse proxy.', logo: null, stars: 198, deprecated: false, repository: { name: 'ingress-nginx', url: 'https://kubernetes.github.io/ingress-nginx', official: true, verified: true } },
+  { id: 'bitnami/postgresql', name: 'postgresql', displayName: 'PostgreSQL', version: '16.2.1', appVersion: '17.2.0', description: 'PostgreSQL is a powerful, open source object-relational database.', logo: null, stars: 154, deprecated: false, repository: { name: 'bitnami', url: 'https://charts.bitnami.com/bitnami', official: true, verified: true } },
+  { id: 'bitnami/redis', name: 'redis', displayName: 'Redis', version: '20.2.1', appVersion: '7.4.1', description: 'Redis is an open source, in-memory data store used as a database and cache.', logo: null, stars: 143, deprecated: false, repository: { name: 'bitnami', url: 'https://charts.bitnami.com/bitnami', official: true, verified: true } },
+  { id: 'argo/argo-cd', name: 'argo-cd', displayName: 'Argo CD', version: '7.7.0', appVersion: 'v2.13.0', description: 'A declarative, GitOps continuous delivery tool for Kubernetes.', logo: null, stars: 231, deprecated: false, repository: { name: 'argo', url: 'https://argoproj.github.io/argo-helm', official: false, verified: true } },
+  { id: 'jetstack/cert-manager', name: 'cert-manager', displayName: 'cert-manager', version: 'v1.16.1', appVersion: 'v1.16.1', description: 'Automatically provision and manage TLS certificates in Kubernetes.', logo: null, stars: 176, deprecated: false, repository: { name: 'jetstack', url: 'https://charts.jetstack.io', official: false, verified: true } },
+];
+
 // ----------------------------------------------------------------------------
 // Main request handler
 // ----------------------------------------------------------------------------
@@ -1142,6 +1155,90 @@ export function handle(req, res) {
         const m = nodeMetricNow(decodeURIComponent(seg[3]));
         return m ? json(m) : json({ available: false });
       }
+    }
+
+    // ---------- OpenCost / Kubecost ----------
+    if (method === 'GET' && p === '/api/costs/status') {
+      return json({ installed: true, provider: 'opencost', namespace: 'opencost', service: 'opencost', port: 9003 });
+    }
+    if (method === 'GET' && p === '/api/costs/allocation') {
+      const groups = {
+        namespace: [
+          { name: 'shop', cpuCost: 4.21, gpuCost: 0, memoryCost: 1.13, pvCost: 0.30, networkCost: 0.30, loadBalancerCost: 0.70, sharedCost: 0.17, totalCost: 6.81 },
+          { name: 'monitoring', cpuCost: 1.40, gpuCost: 0, memoryCost: 0.90, pvCost: 0.20, networkCost: 0.12, loadBalancerCost: 0, sharedCost: 0.24, totalCost: 2.86 },
+          { name: 'kube-system', cpuCost: 0.90, gpuCost: 0, memoryCost: 0.51, pvCost: 0.03, networkCost: 0, loadBalancerCost: 0.10, sharedCost: 0.12, totalCost: 1.66 },
+          { name: 'argocd', cpuCost: 0.42, gpuCost: 0, memoryCost: 0.28, pvCost: 0, networkCost: 0.02, loadBalancerCost: 0, sharedCost: 0.08, totalCost: 0.80 },
+        ],
+        controller: [
+          { name: 'Deployment/frontend', cpuCost: 1.16, gpuCost: 0, memoryCost: 0.25, pvCost: 0, networkCost: 0.06, loadBalancerCost: 0.35, sharedCost: 0.05, totalCost: 1.87 },
+          { name: 'Deployment/catalog', cpuCost: 0.87, gpuCost: 0, memoryCost: 0.23, pvCost: 0, networkCost: 0.03, loadBalancerCost: 0, sharedCost: 0.03, totalCost: 1.16 },
+          { name: 'Deployment/checkout', cpuCost: 0.72, gpuCost: 0, memoryCost: 0.20, pvCost: 0, networkCost: 0.02, loadBalancerCost: 0, sharedCost: 0.02, totalCost: 0.96 },
+          { name: 'StatefulSet/postgres', cpuCost: 0.56, gpuCost: 0, memoryCost: 0.19, pvCost: 0.30, networkCost: 0.01, loadBalancerCost: 0, sharedCost: 0.03, totalCost: 1.09 },
+          { name: 'Deployment/cart', cpuCost: 0.48, gpuCost: 0, memoryCost: 0.16, pvCost: 0, networkCost: 0.02, loadBalancerCost: 0, sharedCost: 0.02, totalCost: 0.68 },
+        ],
+        node: [
+          { name: 'demo-node-1', cpuCost: 2.11, gpuCost: 0, memoryCost: 1.09, pvCost: 0.31, networkCost: 0.13, loadBalancerCost: 0.30, sharedCost: 0.20, totalCost: 4.14 },
+          { name: 'demo-node-2', cpuCost: 2.03, gpuCost: 0, memoryCost: 0.97, pvCost: 0.18, networkCost: 0.17, loadBalancerCost: 0.25, sharedCost: 0.18, totalCost: 3.78 },
+          { name: 'demo-node-3', cpuCost: 1.82, gpuCost: 0, memoryCost: 0.76, pvCost: 0.04, networkCost: 0.14, loadBalancerCost: 0.25, sharedCost: 0.23, totalCost: 3.24 },
+        ],
+        cluster: [
+          { name: 'demo-cluster', cpuCost: 6.93, gpuCost: 0, memoryCost: 2.82, pvCost: 0.53, networkCost: 0.44, loadBalancerCost: 0.80, sharedCost: 0.61, totalCost: 12.13 },
+        ],
+      };
+      const aggregate = ['cluster', 'namespace', 'controller', 'node'].includes(q.aggregate) ? q.aggregate : 'namespace';
+      const factor = ['24h', 'today'].includes(q.window) ? 1 / 7 : q.window === '30d' ? 30 / 7 : q.window === 'month' ? 17 / 7 : 1;
+      const allocations = groups[aggregate].map((row) => Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [key, key === 'name' ? value : Number((value * factor).toFixed(4))])
+      ));
+      return json({
+        provider: 'opencost', source: { namespace: 'opencost', service: 'opencost' },
+        window: q.window || '7d', aggregate,
+        totalCost: allocations.reduce((sum, row) => sum + row.totalCost, 0),
+        currency: 'USD', allocations,
+      });
+    }
+    if (method === 'GET' && p === '/api/costs/timeseries') {
+      // Per-namespace cost split into time buckets so the Cost-over-time chart
+      // has data in demo mode. Totals match the allocation KPIs (sum = $12.13/7d).
+      const baseNs = [
+        { name: 'shop', total: 6.81 },
+        { name: 'monitoring', total: 2.86 },
+        { name: 'kube-system', total: 1.66 },
+        { name: 'argocd', total: 0.80 },
+      ];
+      const win = q.window || '7d';
+      const factor = ['24h', 'today'].includes(win) ? 1 / 7 : win === '30d' ? 30 / 7 : win === 'month' ? 17 / 7 : 1;
+      const hourly = ['24h', 'today'].includes(win);
+      const count = hourly ? 24 : win === '30d' ? 30 : win === 'month' ? 17 : 7;
+      const stepMs = hourly ? 3600e3 : 86400e3;
+      // Deterministic per-bucket weights so bars vary but the demo stays stable.
+      const weights = baseNs.map((_, k) => Array.from({ length: count }, (__, i) => 1 + 0.28 * Math.sin(i * 0.7 + k * 1.3) + 0.12 * Math.sin(i * 0.31 + k)));
+      const wsum = weights.map((w) => w.reduce((a, b) => a + b, 0));
+      const anchor = Math.floor(Date.now() / stepMs) * stepMs; // align to step boundary
+      const series = [];
+      for (let i = 0; i < count; i++) {
+        const costs = {};
+        let total = 0;
+        baseNs.forEach((ns, k) => {
+          const c = Number((ns.total * factor * (weights[k][i] / wsum[k])).toFixed(4));
+          costs[ns.name] = c;
+          total += c;
+        });
+        series.push({
+          start: new Date(anchor - (count - i) * stepMs).toISOString(),
+          end: new Date(anchor - (count - 1 - i) * stepMs).toISOString(),
+          total: Number(total.toFixed(4)),
+          costs,
+        });
+      }
+      const namespaces = baseNs
+        .map((ns) => ({ name: ns.name, totalCost: Number((ns.total * factor).toFixed(4)) }))
+        .sort((a, b) => b.totalCost - a.totalCost);
+      return json({
+        series, namespaces,
+        totalCost: namespaces.reduce((s, n) => s + n.totalCost, 0),
+        currency: 'USD', provider: 'opencost', window: win, step: hourly ? '1h' : '1d',
+      });
     }
 
     // ---------- resources list ----------
@@ -1258,6 +1355,53 @@ export function handle(req, res) {
       const rel = cluster.helm.find((r) => r.namespace === decodeURIComponent(seg[3]) && r.name === decodeURIComponent(seg[4]));
       if (!rel) return json({ error: 'Release not found' }, 404);
       return json({ yaml: rel.manifest || '' });
+    }
+    // ---------- helm chart search & install (canned) ----------
+    if (method === 'GET' && p === '/api/helm/available') {
+      return json({ installed: true, version: 'v3.16.4+demo' });
+    }
+    if (method === 'GET' && p === '/api/helm/charts/search') {
+      const query = String(q.q || '').trim().toLowerCase();
+      if (!query) return json({ charts: [] });
+      const charts = DEMO_CHARTS
+        .filter((c) => c.name.includes(query) || c.description.toLowerCase().includes(query) || c.repository.name.includes(query))
+        .slice(0, Number(q.limit) || 24);
+      return json({ charts });
+    }
+    if (method === 'GET' && p === '/api/helm/charts/versions') {
+      const chart = String(q.chart || '').toLowerCase();
+      const found = DEMO_CHARTS.find((c) => c.name === chart);
+      const base = found?.version || '1.0.0';
+      const [maj, min] = base.split('.');
+      // Fabricate a small descending version list off the chart's current version.
+      const versions = [base, `${maj}.${Math.max(0, Number(min) - 1)}.0`, `${Math.max(0, Number(maj) - 1)}.0.0`]
+        .filter((v, i, a) => a.indexOf(v) === i)
+        .map((v) => ({ version: v, appVersion: found?.appVersion || '', ts: 0 }));
+      return json({ versions });
+    }
+    if (method === 'POST' && p === '/api/helm/install') {
+      const { releaseName, namespace = 'default', chart } = req.body || {};
+      if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(String(releaseName || ''))) {
+        return json({ error: 'Invalid release name (use lowercase letters, digits and dashes)' }, 400);
+      }
+      // Add a live release to the in-memory cluster so it shows up in the list.
+      cluster.helm.push(makeHelmRelease(releaseName, namespace, {
+        chart: chart || releaseName, chartVer: (req.body?.version || '1.0.0'), appVersion: '', status: 'deployed', revision: 1,
+        values: (() => { try { return req.body?.values ? yaml.load(req.body.values) || {} : {}; } catch { return {}; } })(),
+      }));
+      return json({ ok: true, release: releaseName, namespace, output: `NAME: ${releaseName}\nNAMESPACE: ${namespace}\nSTATUS: deployed\nREVISION: 1\n(demo — no cluster changes were made)` });
+    }
+    if (method === 'POST' && p === '/api/helm/upgrade') {
+      const { releaseName, namespace = 'default', version } = req.body || {};
+      const rel = cluster.helm.find((r) => r.name === releaseName && r.namespace === namespace);
+      if (!rel) return json({ error: `Release ${releaseName} not found in ${namespace}` }, 404);
+      // Bump the revision and swap the chart version to mirror a real up/downgrade.
+      rel.version = (rel.version || 1) + 1;
+      if (rel.info) rel.info.status = 'deployed';
+      if (version && rel.chart?.metadata) rel.chart.metadata.version = version;
+      const merged = (() => { try { return req.body?.values ? { ...(rel.config || {}), ...(yaml.load(req.body.values) || {}) } : rel.config; } catch { return rel.config; } })();
+      rel.config = merged;
+      return json({ ok: true, release: releaseName, namespace, output: `Release "${releaseName}" has been upgraded.\nNAMESPACE: ${namespace}\nSTATUS: deployed\nREVISION: ${rel.version}\n(demo — no cluster changes were made)` });
     }
 
     // ---------- custom resources ----------

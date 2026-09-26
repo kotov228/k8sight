@@ -10,14 +10,20 @@
 //   4. Tear the server down on quit (which triggers its port-forward cleanup).
 'use strict';
 
-const { app, BrowserWindow, shell, dialog, Menu, utilityProcess } = require('electron');
+const { app, BrowserWindow, shell, dialog, Menu, utilityProcess, ipcMain } = require('electron');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 const http = require('http');
 const { spawn, execFileSync } = require('child_process');
 
+// electron-updater is optional at runtime (only wired for packaged Win/Linux).
+let autoUpdater = null;
+try { ({ autoUpdater } = require('electron-updater')); } catch { /* not available */ }
+
 const BACKEND_PORT = 3001;
 const SERVER_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+const RELEASES_URL = 'https://github.com/praveenraghav01/k8sight/releases/latest';
 
 let serverProcess = null;
 let mainWindow = null;
@@ -164,6 +170,7 @@ function createWindow() {
     trafficLightPosition: { x: 18, y: 15 },
     show: false,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -237,6 +244,11 @@ if (!gotLock) {
     Menu.setApplicationMenu(buildMenu());
     boot();
 
+    // Background update check shortly after launch (packaged Win/Linux only).
+    if (canAutoUpdate() && autoCheckEnabled()) {
+      setTimeout(() => checkForUpdates(false), 5000);
+    }
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) boot();
     });
@@ -253,6 +265,113 @@ app.on('before-quit', () => {
   stopServer();
 });
 
+// --- Auto-update (electron-updater) ---------------------------------------
+// Works for packaged Windows (NSIS), Linux (AppImage) and macOS builds. macOS
+// OTA is enabled now that release builds are Developer ID-signed & notarized —
+// Squirrel.Mac verifies the signature (it rejects ad-hoc builds) and updates
+// from the published .zip + latest-mac.yml. If macOS can't self-update (e.g. the
+// app is still running from the read-only DMG mount, not /Applications), the
+// error handler surfaces it and a manual check falls back to the Releases page.
+function updaterPrefsPath() { return path.join(app.getPath('userData'), 'updater-prefs.json'); }
+function autoCheckEnabled() {
+  try { return JSON.parse(fs.readFileSync(updaterPrefsPath(), 'utf8')).autoCheck !== false; }
+  catch { return true; } // default on
+}
+function setAutoCheck(on) {
+  try { fs.writeFileSync(updaterPrefsPath(), JSON.stringify({ autoCheck: !!on })); } catch { /* ignore */ }
+}
+function updatesConfigured() {
+  // electron-updater needs app-update.yml, which is written only into published
+  // builds. A local `--dir` / unsigned build doesn't have it, so treat updates as
+  // unavailable there rather than letting checkForUpdates throw ENOENT.
+  try { return fs.existsSync(path.join(process.resourcesPath, 'app-update.yml')); } catch { return false; }
+}
+function canAutoUpdate() {
+  return !!autoUpdater && app.isPackaged && updatesConfigured();
+}
+
+// IPC bridge for the Preferences UI (see electron/preload.cjs). Lets the renderer
+// read and change the auto-update preference the menu checkbox also drives.
+ipcMain.handle('updater:get', () => ({ autoCheck: autoCheckEnabled(), supported: canAutoUpdate() }));
+ipcMain.handle('updater:set', (_e, on) => {
+  setAutoCheck(on);
+  try { Menu.setApplicationMenu(buildMenu()); } catch { /* menu keeps its old checked state */ }
+  if (on) checkForUpdates(false); // start checking immediately when re-enabled
+  return { autoCheck: autoCheckEnabled(), supported: canAutoUpdate() };
+});
+ipcMain.handle('updater:check', () => { checkForUpdates(true); return true; });
+
+let updaterWired = false;
+let manualCheck = false;
+function wireUpdater() {
+  if (!autoUpdater || updaterWired) return;
+  updaterWired = true;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('update-not-available', () => {
+    if (!manualCheck) return;
+    manualCheck = false;
+    dialog.showMessageBox({ type: 'info', title: 'k8sight', message: "You're up to date", detail: `k8sight ${app.getVersion()} is the latest version.` });
+  });
+  autoUpdater.on('error', () => {
+    if (!manualCheck) return;
+    manualCheck = false;
+    dialog.showMessageBox({
+      type: 'warning', title: 'k8sight', message: "Couldn't check for updates",
+      detail: 'Please try again later, or download the latest version from the Releases page.',
+      buttons: ['Open Releases', 'OK'], defaultId: 1, cancelId: 1,
+    }).then(({ response }) => { if (response === 0) shell.openExternal(RELEASES_URL); });
+  });
+  autoUpdater.on('update-downloaded', async (info) => {
+    manualCheck = false;
+    const { response } = await dialog.showMessageBox({
+      type: 'info', buttons: ['Restart now', 'Later'], defaultId: 0, cancelId: 1,
+      title: 'k8sight', message: `k8sight ${info.version} is ready to install`,
+      detail: 'Restart the app to finish updating.',
+    });
+    if (response === 0) { app.isQuitting = true; autoUpdater.quitAndInstall(); }
+  });
+}
+
+function checkForUpdates(manual) {
+  if (!canAutoUpdate()) {
+    // Unsupported (a dev / unsigned --dir run with no update metadata): a manual
+    // check offers the Releases page instead of erroring; auto checks stay silent.
+    if (manual) {
+      dialog.showMessageBox({
+        type: 'info', title: 'k8sight', message: 'Updates are delivered to release builds',
+        detail: "This build doesn't self-update. You can download the latest version from the Releases page.",
+        buttons: ['Open Releases', 'Cancel'], defaultId: 0, cancelId: 1,
+      }).then(({ response }) => { if (response === 0) shell.openExternal(RELEASES_URL); });
+    }
+    return;
+  }
+  wireUpdater();
+  manualCheck = !!manual;
+  autoUpdater.checkForUpdates().catch(() => {
+    if (!manual) return;
+    manualCheck = false;
+    dialog.showMessageBox({
+      type: 'warning', title: 'k8sight', message: "Couldn't check for updates",
+      detail: 'Please try again later, or download the latest version from the Releases page.',
+      buttons: ['Open Releases', 'OK'], defaultId: 1, cancelId: 1,
+    }).then(({ response }) => { if (response === 0) shell.openExternal(RELEASES_URL); });
+  });
+}
+
+function updateMenuItems() {
+  return [
+    { label: 'Check for Updates…', click: () => checkForUpdates(true) },
+    {
+      label: 'Automatically check for updates',
+      type: 'checkbox',
+      checked: autoCheckEnabled(),
+      enabled: canAutoUpdate(),
+      click: (item) => setAutoCheck(item.checked),
+    },
+  ];
+}
+
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const template = [
@@ -261,6 +380,8 @@ function buildMenu() {
           label: app.name,
           submenu: [
             { role: 'about' },
+            { type: 'separator' },
+            ...updateMenuItems(),
             { type: 'separator' },
             { role: 'hide' },
             { role: 'hideOthers' },
@@ -287,6 +408,16 @@ function buildMenu() {
     {
       label: 'Window',
       submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }],
+    },
+    {
+      label: 'Help',
+      role: 'help',
+      submenu: [
+        ...(isMac ? [] : updateMenuItems()),
+        ...(isMac ? [] : [{ type: 'separator' }]),
+        { label: 'k8sight on GitHub', click: () => shell.openExternal('https://github.com/praveenraghav01/k8sight') },
+        { label: 'Releases', click: () => shell.openExternal(RELEASES_URL) },
+      ],
     },
   ];
   return Menu.buildFromTemplate(template);
