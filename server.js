@@ -1070,7 +1070,7 @@ const classifyClusterError = (error) => {
   if (httpStatus === 401) {
     return {
       ok: false, reason: 'unauthorized',
-      message: 'Authentication failed (HTTP 401). Your credentials were rejected — the token or client certificate may be expired or invalid.'
+      message: 'Authentication failed (HTTP 401). Your credentials were rejected. The token or client certificate may be expired or invalid.'
     };
   }
   if (httpStatus === 403) {
@@ -3097,6 +3097,510 @@ app.post('/api/argocd/application/:namespace/:name/refresh', async (req, res) =>
   }
 });
 
+// ==================================================================
+// Flux CD — GitOps Toolkit. Auto-detected from the Flux CRDs
+// (*.toolkit.fluxcd.io) and read straight from the cluster via kubectl, exactly
+// like the Argo CD integration above: a dashboard overview, per-kind list +
+// detail, reconcile / suspend / resume actions, and events for the activity
+// timeline.
+// ==================================================================
+const FLUX_GROUPS = {
+  source: 'source.toolkit.fluxcd.io',
+  kustomize: 'kustomize.toolkit.fluxcd.io',
+  helm: 'helm.toolkit.fluxcd.io',
+  notification: 'notification.toolkit.fluxcd.io',
+  image: 'image.toolkit.fluxcd.io',
+};
+// kind-key -> { kind, resource (fully-qualified kubectl name), category, suspendable }
+const FLUX_KINDS = {
+  kustomization:         { kind: 'Kustomization',         resource: `kustomizations.${FLUX_GROUPS.kustomize}`,         category: 'kustomizations', suspendable: true },
+  helmrelease:           { kind: 'HelmRelease',           resource: `helmreleases.${FLUX_GROUPS.helm}`,                category: 'helmreleases', suspendable: true },
+  gitrepository:         { kind: 'GitRepository',         resource: `gitrepositories.${FLUX_GROUPS.source}`,           category: 'sources', suspendable: true },
+  ocirepository:         { kind: 'OCIRepository',         resource: `ocirepositories.${FLUX_GROUPS.source}`,           category: 'sources', suspendable: true },
+  helmrepository:        { kind: 'HelmRepository',        resource: `helmrepositories.${FLUX_GROUPS.source}`,          category: 'sources', suspendable: true },
+  bucket:                { kind: 'Bucket',                resource: `buckets.${FLUX_GROUPS.source}`,                   category: 'sources', suspendable: true },
+  helmchart:             { kind: 'HelmChart',             resource: `helmcharts.${FLUX_GROUPS.source}`,                category: 'sources', suspendable: true },
+  externalartifact:      { kind: 'ExternalArtifact',      resource: `externalartifacts.${FLUX_GROUPS.source}`,         category: 'sources', suspendable: false },
+  alert:                 { kind: 'Alert',                 resource: `alerts.${FLUX_GROUPS.notification}`,              category: 'notifications', suspendable: true },
+  provider:              { kind: 'Provider',              resource: `providers.${FLUX_GROUPS.notification}`,           category: 'notifications', suspendable: false },
+  receiver:              { kind: 'Receiver',              resource: `receivers.${FLUX_GROUPS.notification}`,           category: 'notifications', suspendable: true },
+  imagerepository:       { kind: 'ImageRepository',       resource: `imagerepositories.${FLUX_GROUPS.image}`,          category: 'image', suspendable: true },
+  imagepolicy:           { kind: 'ImagePolicy',           resource: `imagepolicies.${FLUX_GROUPS.image}`,              category: 'image', suspendable: false },
+  imageupdateautomation: { kind: 'ImageUpdateAutomation', resource: `imageupdateautomations.${FLUX_GROUPS.image}`,     category: 'image', suspendable: true },
+};
+
+// Reconciliation state from status.conditions + spec.suspend.
+const fluxState = (item) => {
+  if (item.spec?.suspend === true) return 'Suspended';
+  const conds = item.status?.conditions || [];
+  const ready = conds.find((c) => c.type === 'Ready');
+  const reconciling = conds.find((c) => c.type === 'Reconciling');
+  const stalled = conds.find((c) => c.type === 'Stalled');
+  if (stalled?.status === 'True') return 'Failed';
+  if (ready?.status === 'True') return 'Ready';
+  if (ready?.status === 'False') return /progress|inprogress|reconcil/i.test(ready.reason || '') ? 'Reconciling' : 'Failed';
+  if (reconciling?.status === 'True') return 'Reconciling';
+  return conds.length ? 'Reconciling' : 'Unknown';
+};
+const fluxSourceRef = (item, kindKey) => {
+  const s = item.spec || {};
+  const ref = s.sourceRef || s.chart?.spec?.sourceRef;
+  if ((kindKey === 'kustomization' || kindKey === 'helmrelease') && ref) {
+    return { kind: ref.kind, name: ref.name, namespace: ref.namespace || item.metadata?.namespace };
+  }
+  return null;
+};
+const fluxRevision = (item) => {
+  const st = item.status || {};
+  return String(st.artifact?.revision || st.lastAppliedRevision || st.lastAttemptedRevision || '');
+};
+const parseFlux = (item, kindKey) => {
+  const meta = item.metadata || {}, spec = item.spec || {}, st = item.status || {};
+  const ready = (st.conditions || []).find((c) => c.type === 'Ready');
+  return {
+    kindKey,
+    kind: FLUX_KINDS[kindKey]?.kind || item.kind,
+    category: FLUX_KINDS[kindKey]?.category,
+    name: meta.name,
+    namespace: meta.namespace,
+    state: fluxState(item),
+    suspended: spec.suspend === true,
+    suspendable: !!FLUX_KINDS[kindKey]?.suspendable,
+    message: ready?.message || '',
+    reason: ready?.reason || '',
+    revision: fluxRevision(item),
+    source: fluxSourceRef(item, kindKey),
+    lastReconciled: ready?.lastTransitionTime || st.lastHandledReconcileAt || '',
+    createdAt: meta.creationTimestamp,
+    interval: spec.interval || '',
+    // kind-specific extras surfaced in list/detail
+    url: spec.url || '',
+    type: spec.type || '',
+    chart: spec.chart?.spec?.chart || (typeof spec.chart === 'string' ? spec.chart : '') || '',
+    chartVersion: st.history?.[0]?.chartVersion || spec.chart?.spec?.version || '',
+    path: spec.path || '',
+    prune: spec.prune === true,
+    targetNamespace: spec.targetNamespace || spec.chart?.spec?.targetNamespace || '',
+    lastAppliedRevision: st.lastAppliedRevision || st.lastAttemptedRevision || '',
+  };
+};
+
+// Detect which Flux CRD groups are installed.
+app.get('/api/flux/status', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.json({ installed: false, groups: {} });
+    const cacheKey = getCacheKey('flux-status', { ctx: currentContext });
+    const cached = getCache(cacheKey);
+    if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+    let groups = { kinds: {} };
+    try {
+      const api = kubeConfig.makeApiClient(k8s.ApiextensionsV1Api);
+      const { items } = await api.listCustomResourceDefinition();
+      const names = new Set(items.map((c) => c.metadata?.name));
+      const kinds = {};
+      for (const [key, def] of Object.entries(FLUX_KINDS)) kinds[key] = names.has(def.resource);
+      groups = {
+        source: names.has(`gitrepositories.${FLUX_GROUPS.source}`),
+        kustomize: names.has(`kustomizations.${FLUX_GROUPS.kustomize}`),
+        helm: names.has(`helmreleases.${FLUX_GROUPS.helm}`),
+        notification: names.has(`alerts.${FLUX_GROUPS.notification}`),
+        image: names.has(`imagerepositories.${FLUX_GROUPS.image}`),
+        kinds,
+      };
+    } catch { groups = { kinds: {} }; }
+    const installed = !!(groups.source || groups.kustomize || groups.helm || groups.notification || groups.image);
+    const result = { installed, groups };
+    setCache(cacheKey, result, CACHE_TTL.namespaces);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message, installed: false }); }
+});
+
+// List one Flux kind (returns [] for a missing CRD rather than erroring).
+const listFluxKind = async (kindKey, { namespace } = {}) => {
+  const def = FLUX_KINDS[kindKey];
+  if (!def) return [];
+  const nsArgs = namespace && namespace !== 'all' ? ['-n', namespace] : ['-A'];
+  try {
+    const { stdout } = await execFileAsync('kubectl', kctl('get', def.resource, ...nsArgs, '-o', 'json'),
+      { encoding: 'utf-8', maxBuffer: 80 * 1024 * 1024, timeout: 20000 });
+    return (JSON.parse(stdout).items || []).map((i) => parseFlux(i, kindKey));
+  } catch (e) {
+    if (/NotFound|doesn't have a resource type|could not find|the server could not find/i.test(e.stderr || e.message || '')) return [];
+    throw e;
+  }
+};
+
+app.get('/api/flux/resources', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const kindKey = String(req.query.kind || '');
+    if (!FLUX_KINDS[kindKey]) return res.status(400).json({ error: 'Unknown Flux kind' });
+    const cacheKey = getCacheKey('flux-res', { ctx: currentContext, kindKey });
+    const cached = getCache(cacheKey);
+    if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+    const items = await listFluxKind(kindKey);
+    items.sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`));
+    const result = { kind: FLUX_KINDS[kindKey].kind, kindKey, resources: items };
+    setCache(cacheKey, result, CACHE_TTL.resources);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: (e.stderr || e.message || '').trim(), resources: [] }); }
+});
+
+// Dashboard overview: per-category ready/total, needs-attention, recent activity.
+app.get('/api/flux/overview', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const cacheKey = getCacheKey('flux-overview', { ctx: currentContext });
+    const cached = getCache(cacheKey);
+    if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+    const keys = Object.keys(FLUX_KINDS);
+    const lists = await Promise.all(keys.map((k) => listFluxKind(k).catch(() => [])));
+    const all = [];
+    keys.forEach((k, i) => lists[i].forEach((r) => all.push(r)));
+    const summary = {};
+    for (const r of all) {
+      const c = r.category;
+      const s = (summary[c] = summary[c] || { total: 0, ready: 0, reconciling: 0, failed: 0, suspended: 0 });
+      s.total++;
+      if (r.state === 'Ready') s.ready++;
+      else if (r.state === 'Reconciling') s.reconciling++;
+      else if (r.state === 'Failed') s.failed++;
+      else if (r.state === 'Suspended') s.suspended++;
+    }
+    // "Needs attention" = anything not Ready (reconciling, failed, suspended), as in Lens.
+    const attention = all.filter((r) => r.state !== 'Ready')
+      .sort((a, b) => (a.state === 'Failed' ? -1 : 1) - (b.state === 'Failed' ? -1 : 1));
+    const total = all.length;
+    const ready = all.filter((r) => r.state === 'Ready').length;
+    const healthy = !all.some((r) => r.state === 'Failed');
+    let activity = [];
+    try {
+      const { stdout } = await execFileAsync('kubectl', kctl('get', 'events', '-A', '-o', 'json'),
+        { encoding: 'utf-8', maxBuffer: 80 * 1024 * 1024, timeout: 20000 });
+      const fluxKindNames = new Set(Object.values(FLUX_KINDS).map((d) => d.kind));
+      activity = (JSON.parse(stdout).items || [])
+        .filter((e) => fluxKindNames.has(e.involvedObject?.kind))
+        .map((e) => ({
+          kind: e.involvedObject.kind, name: e.involvedObject.name, namespace: e.involvedObject.namespace,
+          type: e.type, reason: e.reason, message: e.message, count: e.count || e.series?.count || 1,
+          at: e.lastTimestamp || e.series?.lastObservedTime || e.eventTime || e.metadata?.creationTimestamp,
+        }))
+        .sort((a, b) => new Date(b.at) - new Date(a.at))
+        .slice(0, 60);
+    } catch { /* events are best-effort */ }
+    const result = { total, ready, healthy, summary, attention, activity };
+    setCache(cacheKey, result, CACHE_TTL.resources);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// One Flux resource in full (properties + reconciliation + conditions + events).
+app.get('/api/flux/resource/:kindKey/:namespace/:name', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { kindKey, namespace, name } = req.params;
+    const def = FLUX_KINDS[kindKey];
+    if (!def) return res.status(400).json({ error: 'Unknown Flux kind' });
+    const { stdout } = await execFileAsync('kubectl', kctl('get', def.resource, name, '-n', namespace, '-o', 'json'),
+      { encoding: 'utf-8', maxBuffer: 40 * 1024 * 1024, timeout: 15000 });
+    const item = JSON.parse(stdout);
+    let events = [];
+    try {
+      const { stdout: ev } = await execFileAsync('kubectl', kctl('get', 'events', '-n', namespace,
+        '--field-selector', `involvedObject.name=${name},involvedObject.kind=${def.kind}`, '-o', 'json'),
+        { encoding: 'utf-8', maxBuffer: 20 * 1024 * 1024, timeout: 12000 });
+      events = (JSON.parse(ev).items || [])
+        .map((e) => ({ type: e.type, reason: e.reason, message: e.message, count: e.count || 1, at: e.lastTimestamp || e.eventTime }))
+        .sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 30);
+    } catch { /* events optional */ }
+    // Managed resources — the inventory a Kustomization / HelmRelease applies.
+    // Kustomization: status.inventory.entries[].id = "ns_name_group_kind".
+    // HelmRelease:   status.history[0].* has no inventory; left empty.
+    const managed = (item.status?.inventory?.entries || []).map((e) => {
+      const parts = String(e.id || '').split('_');
+      const [ns, nm, grp, knd] = parts.length >= 4 ? parts : ['', parts[0] || '', '', parts[1] || ''];
+      return { namespace: ns, name: nm, group: grp, kind: knd };
+    });
+    res.json({
+      summary: parseFlux(item, kindKey),
+      spec: item.spec || {},
+      status: item.status || {},
+      conditions: item.status?.conditions || [],
+      metadata: {
+        annotations: item.metadata?.annotations || {}, labels: item.metadata?.labels || {},
+        finalizers: item.metadata?.finalizers || [], creationTimestamp: item.metadata?.creationTimestamp,
+      },
+      managed,
+      events,
+    });
+  } catch (e) { res.status(500).json({ error: (e.stderr || e.message || '').trim() }); }
+});
+
+// Delete a Flux resource.
+app.delete('/api/flux/resource/:kindKey/:namespace/:name', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { kindKey, namespace, name } = req.params;
+    const def = FLUX_KINDS[kindKey];
+    if (!def) return res.status(400).json({ error: 'Unknown Flux kind' });
+    const out = await runKubectl(['delete', def.resource, name, '-n', namespace]);
+    cache.clear();
+    res.json({ success: true, message: out || 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Trigger an immediate reconciliation (equivalent to `flux reconcile`).
+app.post('/api/flux/resource/:kindKey/:namespace/:name/reconcile', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { kindKey, namespace, name } = req.params;
+    const def = FLUX_KINDS[kindKey];
+    if (!def) return res.status(400).json({ error: 'Unknown Flux kind' });
+    const out = await runKubectl(['annotate', def.resource, name, '-n', namespace,
+      `reconcile.fluxcd.io/requestedAt=${new Date().toISOString()}`, '--overwrite']);
+    cache.clear();
+    res.json({ success: true, message: out || 'Reconciliation requested' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Suspend or resume reconciliation (spec.suspend).
+const fluxSuspend = (suspend) => async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { kindKey, namespace, name } = req.params;
+    const def = FLUX_KINDS[kindKey];
+    if (!def) return res.status(400).json({ error: 'Unknown Flux kind' });
+    const out = await runKubectl(['patch', def.resource, name, '-n', namespace, '--type', 'merge',
+      '-p', JSON.stringify({ spec: { suspend } })]);
+    cache.clear();
+    res.json({ success: true, message: out || (suspend ? 'Suspended' : 'Resumed') });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+};
+app.post('/api/flux/resource/:kindKey/:namespace/:name/suspend', fluxSuspend(true));
+app.post('/api/flux/resource/:kindKey/:namespace/:name/resume', fluxSuspend(false));
+
+// ---------------------------------------------------------------------------
+// Flagger (progressive delivery) — auto-detected from the flagger.app CRDs.
+// Canaries drive a Deployment/DaemonSet through canary, A/B or blue/green
+// releases; MetricTemplates and AlertProviders back the analysis.
+// ---------------------------------------------------------------------------
+const FLAGGER_GROUP = 'flagger.app';
+const FLAGGER_KINDS = {
+  canary:         { kind: 'Canary',         resource: `canaries.${FLAGGER_GROUP}` },
+  metrictemplate: { kind: 'MetricTemplate', resource: `metrictemplates.${FLAGGER_GROUP}` },
+  alertprovider:  { kind: 'AlertProvider',  resource: `alertproviders.${FLAGGER_GROUP}` },
+};
+
+// Which release strategy a Canary's analysis block selects (see docs.flagger.app
+// "Deployment Strategies"): match → A/B, mirror → B/G mirroring, step weights →
+// canary, iterations alone → blue/green.
+const flaggerStrategy = (a = {}) => {
+  if (Array.isArray(a.match) && a.match.length) return 'A/B testing';
+  if (a.mirror) return 'Blue/Green mirroring';
+  if (a.stepWeight || (a.stepWeights || []).length) return a.sessionAffinity ? 'Canary (session affinity)' : 'Canary';
+  if (a.iterations) return 'Blue/Green';
+  return 'Canary';
+};
+
+const parseCanary = (item) => {
+  const spec = item.spec || {};
+  const st = item.status || {};
+  const a = spec.analysis || spec.canaryAnalysis || {};
+  const strategy = flaggerStrategy(a);
+  const weighted = strategy.startsWith('Canary');
+  const promoted = (st.conditions || []).find((c) => c.type === 'Promoted');
+  return {
+    kindKey: 'canary', kind: 'Canary',
+    name: item.metadata?.name, namespace: item.metadata?.namespace,
+    phase: st.phase || 'Initializing',
+    suspended: !!spec.suspend,
+    skipAnalysis: !!spec.skipAnalysis,
+    strategy,
+    target: spec.targetRef ? { kind: spec.targetRef.kind || 'Deployment', name: spec.targetRef.name } : null,
+    service: spec.service?.name || spec.targetRef?.name || '',
+    port: spec.service?.port || null,
+    provider: spec.provider || '',
+    autoscaler: spec.autoscalerRef?.name || '',
+    weight: st.canaryWeight || 0,
+    maxWeight: weighted ? (a.maxWeight || (a.stepWeights || []).slice(-1)[0] || 100) : null,
+    stepWeight: a.stepWeight || null,
+    stepWeights: a.stepWeights || null,
+    iterations: st.iterations || 0,
+    maxIterations: a.iterations || null,
+    failedChecks: st.failedChecks || 0,
+    threshold: a.threshold || null,
+    interval: a.interval || '',
+    message: promoted?.message || '',
+    lastTransition: st.lastTransitionTime || promoted?.lastTransitionTime || null,
+    createdAt: item.metadata?.creationTimestamp,
+  };
+};
+
+const parseMetricTemplate = (item) => ({
+  kindKey: 'metrictemplate', kind: 'MetricTemplate',
+  name: item.metadata?.name, namespace: item.metadata?.namespace,
+  provider: item.spec?.provider?.type || '',
+  address: item.spec?.provider?.address || '',
+  query: item.spec?.query || '',
+  createdAt: item.metadata?.creationTimestamp,
+});
+
+const parseAlertProvider = (item) => ({
+  kindKey: 'alertprovider', kind: 'AlertProvider',
+  name: item.metadata?.name, namespace: item.metadata?.namespace,
+  type: item.spec?.type || '',
+  channel: item.spec?.channel || '',
+  username: item.spec?.username || '',
+  createdAt: item.metadata?.creationTimestamp,
+});
+
+const FLAGGER_PARSE = { canary: parseCanary, metrictemplate: parseMetricTemplate, alertprovider: parseAlertProvider };
+
+app.get('/api/flagger/status', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.json({ installed: false, kinds: {} });
+    const cacheKey = getCacheKey('flagger-status', { ctx: currentContext });
+    const cached = getCache(cacheKey);
+    if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+    const kinds = {};
+    try {
+      const api = kubeConfig.makeApiClient(k8s.ApiextensionsV1Api);
+      const { items } = await api.listCustomResourceDefinition();
+      const names = new Set(items.map((c) => c.metadata?.name));
+      for (const [key, def] of Object.entries(FLAGGER_KINDS)) kinds[key] = names.has(def.resource);
+    } catch { /* no CRD access → not installed */ }
+    const result = { installed: !!kinds.canary, kinds };
+    setCache(cacheKey, result, CACHE_TTL.namespaces);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message, installed: false }); }
+});
+
+const listFlaggerKind = async (kindKey) => {
+  const def = FLAGGER_KINDS[kindKey];
+  if (!def) return [];
+  try {
+    const { stdout } = await execFileAsync('kubectl', kctl('get', def.resource, '-A', '-o', 'json'),
+      { encoding: 'utf-8', maxBuffer: 80 * 1024 * 1024, timeout: 20000 });
+    return (JSON.parse(stdout).items || []).map(FLAGGER_PARSE[kindKey]);
+  } catch (e) {
+    if (/NotFound|doesn't have a resource type|could not find|the server could not find/i.test(e.stderr || e.message || '')) return [];
+    throw e;
+  }
+};
+
+app.get('/api/flagger/resources', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const kindKey = String(req.query.kind || '');
+    if (!FLAGGER_KINDS[kindKey]) return res.status(400).json({ error: 'Unknown Flagger kind' });
+    const cacheKey = getCacheKey('flagger-res', { ctx: currentContext, kindKey });
+    const cached = getCache(cacheKey);
+    if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+    const items = await listFlaggerKind(kindKey);
+    items.sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`));
+    const result = { kind: FLAGGER_KINDS[kindKey].kind, kindKey, resources: items };
+    setCache(cacheKey, result, CACHE_TTL.resources);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: (e.stderr || e.message || '').trim(), resources: [] }); }
+});
+
+// The objects Flagger creates for a Canary (docs: "How it works").
+const flaggerGenerated = (c) => {
+  if (!c.target) return [];
+  const out = [
+    { kind: c.target.kind, name: `${c.target.name}-primary`, role: 'Primary (stable)' },
+    { kind: c.target.kind, name: c.target.name, role: 'Canary (target)' },
+  ];
+  if (c.service) {
+    out.push({ kind: 'Service', name: c.service, role: 'Apex' });
+    out.push({ kind: 'Service', name: `${c.service}-primary`, role: 'Primary' });
+    out.push({ kind: 'Service', name: `${c.service}-canary`, role: 'Canary' });
+  }
+  if (c.autoscaler) out.push({ kind: 'HorizontalPodAutoscaler', name: `${c.autoscaler}-primary`, role: 'Primary autoscaler' });
+  return out.map((o) => ({ ...o, namespace: c.namespace }));
+};
+
+app.get('/api/flagger/resource/:kindKey/:namespace/:name', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { kindKey, namespace, name } = req.params;
+    const def = FLAGGER_KINDS[kindKey];
+    if (!def) return res.status(400).json({ error: 'Unknown Flagger kind' });
+    const { stdout } = await execFileAsync('kubectl', kctl('get', def.resource, name, '-n', namespace, '-o', 'json'),
+      { encoding: 'utf-8', maxBuffer: 40 * 1024 * 1024, timeout: 15000 });
+    const item = JSON.parse(stdout);
+    let events = [];
+    try {
+      const { stdout: ev } = await execFileAsync('kubectl', kctl('get', 'events', '-n', namespace,
+        '--field-selector', `involvedObject.name=${name},involvedObject.kind=${def.kind}`, '-o', 'json'),
+        { encoding: 'utf-8', maxBuffer: 20 * 1024 * 1024, timeout: 12000 });
+      events = (JSON.parse(ev).items || [])
+        .map((e) => ({ type: e.type, reason: e.reason, message: e.message, count: e.count || 1, at: e.lastTimestamp || e.eventTime }))
+        .sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 40);
+    } catch { /* events optional */ }
+    const summary = FLAGGER_PARSE[kindKey](item);
+    const a = item.spec?.analysis || item.spec?.canaryAnalysis || {};
+    res.json({
+      summary,
+      spec: item.spec || {},
+      status: item.status || {},
+      conditions: item.status?.conditions || [],
+      metadata: {
+        annotations: item.metadata?.annotations || {}, labels: item.metadata?.labels || {},
+        creationTimestamp: item.metadata?.creationTimestamp,
+      },
+      analysis: kindKey === 'canary' ? { metrics: a.metrics || [], webhooks: a.webhooks || [], alerts: a.alerts || [], match: a.match || [] } : null,
+      generated: kindKey === 'canary' ? flaggerGenerated(summary) : [],
+      events,
+    });
+  } catch (e) { res.status(500).json({ error: (e.stderr || e.message || '').trim() }); }
+});
+
+app.delete('/api/flagger/resource/:kindKey/:namespace/:name', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { kindKey, namespace, name } = req.params;
+    const def = FLAGGER_KINDS[kindKey];
+    if (!def) return res.status(400).json({ error: 'Unknown Flagger kind' });
+    const out = await runKubectl(['delete', def.resource, name, '-n', namespace]);
+    cache.clear();
+    res.json({ success: true, message: out || 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Canary actions: suspend/resume (spec.suspend), skip/unskip analysis
+// (spec.skipAnalysis) and restart — a rollout restart of the target changes its
+// pod template, which Flagger treats as a new revision and re-runs the analysis.
+const flaggerPatch = (field, value, message) => async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { namespace, name } = req.params;
+    const out = await runKubectl(['patch', FLAGGER_KINDS.canary.resource, name, '-n', namespace, '--type', 'merge',
+      '-p', JSON.stringify({ spec: { [field]: value } })]);
+    cache.clear();
+    res.json({ success: true, message: out || message });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+};
+app.post('/api/flagger/canary/:namespace/:name/suspend', flaggerPatch('suspend', true, 'Suspended'));
+app.post('/api/flagger/canary/:namespace/:name/resume', flaggerPatch('suspend', false, 'Resumed'));
+app.post('/api/flagger/canary/:namespace/:name/skip-analysis', flaggerPatch('skipAnalysis', true, 'Analysis will be skipped'));
+app.post('/api/flagger/canary/:namespace/:name/enable-analysis', flaggerPatch('skipAnalysis', false, 'Analysis enabled'));
+app.post('/api/flagger/canary/:namespace/:name/restart', async (req, res) => {
+  try {
+    if (!kubeConfig) return res.status(400).json({ error: 'No kubeconfig loaded' });
+    const { namespace, name } = req.params;
+    const { stdout } = await execFileAsync('kubectl', kctl('get', FLAGGER_KINDS.canary.resource, name, '-n', namespace, '-o', 'json'),
+      { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, timeout: 15000 });
+    const ref = JSON.parse(stdout).spec?.targetRef;
+    if (!ref?.name) return res.status(400).json({ error: 'Canary has no targetRef' });
+    const kind = String(ref.kind || 'Deployment').toLowerCase();
+    if (!['deployment', 'daemonset'].includes(kind)) return res.status(400).json({ error: `Cannot restart a ${ref.kind}` });
+    const out = await runKubectl(['rollout', 'restart', `${kind}/${ref.name}`, '-n', namespace]);
+    cache.clear();
+    res.json({ success: true, message: out || 'Restarted. Flagger will start a new analysis.' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 const parseCpuCores = (s) => {
   if (!s || s === '-') return 0;
   if (String(s).endsWith('m')) return parseInt(s) / 1000;
@@ -4981,7 +5485,7 @@ wss.on('connection', async (browserWs, req) => {
         term = pty.spawn(kubectlBin, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd: process.env.HOME || '/', env: process.env });
       } catch (err) {
         const hint = kubectlBin === 'kubectl'
-          ? ' (kubectl was not found — install it or add it to PATH)'
+          ? ' (kubectl was not found; install it or add it to PATH)'
           : '';
         send(`\r\n\x1b[31mFailed to start node shell: ${err.message}${hint}\x1b[0m\r\n`);
         browserWs.close();
@@ -5006,7 +5510,7 @@ wss.on('connection', async (browserWs, req) => {
         term = pty.spawn(kubectlBin, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd: process.env.HOME || '/', env: process.env });
       } catch (err) {
         const hint = kubectlBin === 'kubectl'
-          ? ' (kubectl was not found — install it or add it to PATH)'
+          ? ' (kubectl was not found; install it or add it to PATH)'
           : '';
         send(`\r\n\x1b[31mFailed to start shell: ${err.message}${hint}\x1b[0m\r\n`);
         browserWs.close();

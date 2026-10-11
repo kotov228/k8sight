@@ -16,6 +16,12 @@ export default function Navigation({
   argocdInstalled,
   argoView,
   onSelectArgoView,
+  fluxInstalled,
+  fluxView,
+  onSelectFluxView,
+  flaggerInstalled,
+  flaggerView,
+  onSelectFlaggerView,
   securityView,
   onSelectSecurityView,
   costsView,
@@ -24,7 +30,9 @@ export default function Navigation({
   onAddAws,
   onAddGke,
   onAddLocal,
-  onOpenPreferences
+  onOpenPreferences,
+  prodMark,
+  currentIsProd
 }) {
   // Route context changes through the app-level switch so the new cluster's
   // namespaces + resources are re-fetched (a plain POST leaves the UI empty).
@@ -95,7 +103,7 @@ export default function Navigation({
   // Clusters live under a nested "Settings" group.
   const argocdTypes = [
     { key: 'dashboard', label: 'Dashboard', icon: 'overview' },
-    { key: 'applications', label: 'Applications', icon: 'argocd' },
+    { key: 'applications', label: 'Applications', icon: 'deployment' },
     { key: 'view', label: 'View', icon: 'topology' },
     { key: 'appsets', label: 'Application Sets', icon: 'box' },
     { key: 'projects', label: 'Projects', icon: 'accessControl' },
@@ -104,6 +112,52 @@ export default function Navigation({
     { key: 'repositories', label: 'Repositories', icon: 'git' },
     { key: 'clusters', label: 'Clusters', icon: 'cluster' },
   ];
+
+  // Flux CD sub-views — mirror the Lens Navigator layout.
+  const fluxMainTypes = [
+    { key: 'dashboard', label: 'Dashboard', icon: 'overview' },
+    { key: 'helmrelease', label: 'Helm Releases', icon: 'helm' },
+    { key: 'kustomization', label: 'Kustomizations', icon: 'configuration' },
+  ];
+  const fluxNotificationTypes = [
+    { key: 'alert', label: 'Alerts', icon: 'events' },
+    { key: 'provider', label: 'Providers', icon: 'send' },
+    { key: 'receiver', label: 'Receivers', icon: 'receiver' },
+  ];
+  const fluxSourceTypes = [
+    { key: 'gitrepository', label: 'Git Repositories', icon: 'git' },
+    { key: 'ocirepository', label: 'OCI Repositories', icon: 'box' },
+    { key: 'helmrepository', label: 'Helm Repositories', icon: 'helm' },
+    { key: 'bucket', label: 'Buckets', icon: 'bucket' },
+    { key: 'externalartifact', label: 'External Artifacts', icon: 'box' },
+  ];
+  const flaggerTypes = [
+    { key: 'canary', label: 'Canaries', icon: 'rocket' },
+    { key: 'metrictemplate', label: 'Metric Templates', icon: 'activity' },
+    { key: 'alertprovider', label: 'Alert Providers', icon: 'bell' },
+  ];
+  const fluxItem = (type) => (
+    <div
+      key={type.key}
+      className={`nav-item ${fluxView === type.key ? 'active' : ''}`}
+      onClick={() => onSelectFluxView(type.key)}
+      title={type.label}
+    >
+      <Icon name={type.icon} size={15} className="nav-lead-icon" />
+      {type.label}
+    </div>
+  );
+  const fluxSubsection = (key, label, items) => (
+    <div className="nav-subsection">
+      <div className="nav-section-title nested" onClick={() => onToggleNav(key)}>
+        <span className={`nav-section-chevron ${navExpanded[key] ? 'open' : ''}`}>
+          <Icon name="chevronRight" size={13} strokeWidth={2.2} />
+        </span>
+        {label}
+      </div>
+      {navExpanded[key] && <div className="nav-items">{items.map(fluxItem)}</div>}
+    </div>
+  );
 
   const renderTreeItem = (type) => (
     <div
@@ -147,7 +201,14 @@ export default function Navigation({
             <Icon name="settings" size={16} />
           </button>
         </div>
-        <div className="nav-cluster">Context</div>
+        <div className="nav-cluster">
+          Context
+          {currentIsProd && prodMark?.prefs?.badge && (
+            <span className="prod-badge" style={{ '--prod-color': prodMark.prefs.color }} title="You are working in a production cluster">
+              <span className="prod-badge-dot" /> PRODUCTION
+            </span>
+          )}
+        </div>
         <ContextSelector
           contexts={configStatus.contexts || []}
           contextsInfo={configStatus.contextsInfo}
@@ -157,6 +218,7 @@ export default function Navigation({
           onAddAws={onAddAws}
           onAddGke={onAddGke}
           onAddLocal={onAddLocal}
+          prodMark={prodMark}
         />
       </div>
 
@@ -236,6 +298,54 @@ export default function Navigation({
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {fluxInstalled && (
+          <div className="nav-section">
+            <div className="nav-section-title" onClick={() => onToggleNav('flux')}>
+              <span className={`nav-section-chevron ${navExpanded.flux ? 'open' : ''}`}>
+                <Icon name="chevronRight" size={13} strokeWidth={2.2} />
+              </span>
+              <Icon name="flux" size={15} className="nav-lead-icon" />
+              Flux
+              <span className="nav-new-badge">NEW</span>
+            </div>
+            {navExpanded.flux && (
+              <div className="nav-items">
+                {fluxMainTypes.map(fluxItem)}
+                {fluxSubsection('fluxNotifications', 'Notifications', fluxNotificationTypes)}
+                {fluxSubsection('fluxSources', 'Sources', fluxSourceTypes)}
+              </div>
+            )}
+          </div>
+        )}
+
+        {flaggerInstalled && (
+          <div className="nav-section">
+            <div className="nav-section-title" onClick={() => onToggleNav('flagger')}>
+              <span className={`nav-section-chevron ${navExpanded.flagger ? 'open' : ''}`}>
+                <Icon name="chevronRight" size={13} strokeWidth={2.2} />
+              </span>
+              <Icon name="flagger" size={15} className="nav-lead-icon" />
+              Flagger
+              <span className="nav-new-badge">NEW</span>
+            </div>
+            {navExpanded.flagger && (
+              <div className="nav-items">
+                {flaggerTypes.map((type) => (
+                  <div
+                    key={type.key}
+                    className={`nav-item ${flaggerView === type.key ? 'active' : ''}`}
+                    onClick={() => onSelectFlaggerView(type.key)}
+                    title={type.label}
+                  >
+                    <Icon name={type.icon} size={15} className="nav-lead-icon" />
+                    {type.label}
+                  </div>
+                ))}
               </div>
             )}
           </div>

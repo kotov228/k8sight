@@ -12,7 +12,7 @@ const PROVIDERS = {
 };
 const ORDER = ['demo', 'aws', 'azure', 'gcp', 'local', 'other'];
 
-export default function ContextSelector({ contexts = [], contextsInfo, currentContext, onChange, onAddAzure, onAddAws, onAddGke, onAddLocal }) {
+export default function ContextSelector({ contexts = [], contextsInfo, currentContext, onChange, onAddAzure, onAddAws, onAddGke, onAddLocal, prodMark }) {
   const [open, setOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -115,16 +115,43 @@ export default function ContextSelector({ contexts = [], contextsInfo, currentCo
                   <span>{PROVIDERS[k].label}</span>
                   <span className="ctx-group-count">{grouped[k].length}</span>
                 </div>
-                {grouped[k].map((ctx) => (
+                {grouped[k].map((ctx) => {
+                  const prod = prodMark?.isProd(ctx);
+                  return (
                   <button key={ctx} className={`ctx-option ${ctx === currentContext ? 'active' : ''}`} onClick={() => pick(ctx)} title={ctx}>
                     <span className="ctx-option-check">{ctx === currentContext && <Icon name="check" size={14} strokeWidth={2.4} />}</span>
                     <span className="ctx-dot" style={{ background: PROVIDERS[k].color }} />
                     <span className="ctx-option-label">{ctx}</span>
+                    {prod && <span className="ctx-prod-pill" style={{ '--prod-color': prodMark.prefs.color }}>PROD</span>}
+                    {prodMark && (
+                      <span
+                        className="ctx-prod-toggle"
+                        role="button"
+                        tabIndex={0}
+                        title={prod ? 'Unmark as production' : 'Mark as production'}
+                        onClick={(e) => { e.stopPropagation(); prodMark.toggle(ctx); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); prodMark.toggle(ctx); } }}
+                      >
+                        <Icon name={prod ? 'shieldCheck' : 'shield'} size={14} />
+                      </span>
+                    )}
                   </button>
-                ))}
+                  );
+                })}
               </div>
             ))}
           </div>
+          {prodMark && currentContext && (
+            <button
+              className={`ctx-prodmark-row ${prodMark.isProd(currentContext) ? 'is-prod' : ''}`}
+              onClick={() => prodMark.toggle(currentContext)}
+              style={prodMark.isProd(currentContext) ? { '--prod-color': prodMark.prefs.color } : undefined}
+              title="Toggle whether this cluster is marked as production"
+            >
+              <Icon name={prodMark.isProd(currentContext) ? 'shieldCheck' : 'shield'} size={14} />
+              <span>{prodMark.isProd(currentContext) ? 'Unmark this cluster as production' : 'Mark this cluster as production'}</span>
+            </button>
+          )}
           {(onAddAzure || onAddAws || onAddGke || onAddLocal) && (
             <div className="ctx-add-row">
               <button className={`ctx-add-cluster ${addOpen ? 'open' : ''}`} onClick={() => setAddOpen((o) => !o)}>
@@ -150,7 +177,7 @@ export default function ContextSelector({ contexts = [], contextsInfo, currentCo
                   )}
                   {onAddLocal && (
                     <button className="ctx-add-item" onClick={() => { setOpen(false); onAddLocal(); }}>
-                      <Icon name="box" size={15} style={{ color: PROVIDERS.local.color }} /> Local — load kubeconfig
+                      <Icon name="box" size={15} style={{ color: PROVIDERS.local.color }} /> Local: load kubeconfig
                     </button>
                   )}
                 </div>

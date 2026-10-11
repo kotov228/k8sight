@@ -113,7 +113,7 @@ function startServer(fixedPath) {
     if (!app.isQuitting && code !== 0 && code !== null) {
       const portTaken = /EADDRINUSE|already in use/i.test(stderrTail);
       const detail = portTaken
-        ? `Port ${BACKEND_PORT} is already in use — another copy of the app or a process on that port is running. Quit it and relaunch.`
+        ? `Port ${BACKEND_PORT} is already in use. Another copy of the app or a process on that port is running. Quit it and relaunch.`
         : `The backend exited unexpectedly (code ${code}).` +
           (stderrTail.trim() ? `\n\n${stderrTail.trim().split('\n').slice(-4).join('\n')}` : '');
       dialog.showErrorBox('k8sight', detail);
@@ -177,12 +177,22 @@ function createWindow() {
   });
 
   // Tag the document so the frontend can offset content below the traffic
-  // lights and expose a draggable region (CSS `.is-electron` rules).
+  // lights and expose a draggable region (CSS `.is-electron` rules). Also track
+  // fullscreen so overlays (e.g. the production-mark edge) can match the window:
+  // macOS rounds windowed corners (~10px) but is square in fullscreen.
+  const syncFullscreen = () => {
+    mainWindow?.webContents
+      .executeJavaScript(`document.documentElement.classList.toggle('is-fullscreen', ${!!mainWindow?.isFullScreen?.()})`)
+      .catch(() => {});
+  };
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents
       .executeJavaScript("document.documentElement.classList.add('is-electron')")
       .catch(() => {});
+    syncFullscreen();
   });
+  mainWindow.on('enter-full-screen', syncFullscreen);
+  mainWindow.on('leave-full-screen', syncFullscreen);
 
   // Show a lightweight loading page immediately.
   mainWindow.loadFile(path.join(__dirname, 'loading.html'));

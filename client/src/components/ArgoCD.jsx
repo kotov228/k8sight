@@ -201,7 +201,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
     }
     const verb = bulk.type === 'sync' ? 'Synced' : 'Refreshed';
     if (!failed) toast.success(`${verb} ${ok} application${ok === 1 ? '' : 's'}`, { title: 'ArgoCD' });
-    else toast.error(`${verb} ${ok}, ${failed} failed — ${lastErr}`, { title: 'ArgoCD' });
+    else toast.error(`${verb} ${ok}, ${failed} failed: ${lastErr}`, { title: 'ArgoCD' });
     setBulk(null); setSelRows(new Set()); setTimeout(() => load({ silent: true }), 1000);
   };
   const doDelete = async () => {
@@ -229,7 +229,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
     const bad = (d.resources || []).filter((r) => r.syncStatus !== 'Synced' || (r.healthStatus && r.healthStatus !== 'Healthy'));
     const lines = [
       `Analyze the current condition of the ArgoCD Application "${a.name}" (namespace ${a.namespace}, project ${a.project}).`,
-      `Sync status: ${a.syncStatus}. Health status: ${a.healthStatus}${a.healthMessage ? ` — ${a.healthMessage}` : ''}.`,
+      `Sync status: ${a.syncStatus}. Health status: ${a.healthStatus}${a.healthMessage ? ` (${a.healthMessage})` : ''}.`,
       a.repoURL ? `Source: ${a.repoURL}${a.path ? ` (path ${a.path})` : ''} @ ${a.targetRevision || 'HEAD'}.` : '',
       `Destination: cluster ${a.destName || a.destServer || '?'}, namespace ${a.destNamespace || '?'}.`,
       bad.length ? `Resources needing attention:\n${bad.slice(0, 25).map((r) => `- ${r.kind}/${r.name}: sync=${r.syncStatus} health=${r.healthStatus || 'n/a'}${r.healthMessage ? ` (${r.healthMessage})` : ''}`).join('\n')}` : 'All managed resources are Synced and Healthy.',
@@ -242,7 +242,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
   const menuItems = (app) => [
     { icon: 'details', label: 'Show details', onClick: () => setSelected(app) },
     { icon: 'sparkles', label: `Summarize (${askLabel()})`, onClick: () => summarize(app) },
-    { icon: 'argocd', label: 'Sync', onClick: () => setSyncDialog({ app, prune: false, dryRun: false, applyOnly: false, force: false, replace: false }) },
+    { icon: 'rocket', label: 'Sync', onClick: () => setSyncDialog({ app, prune: false, dryRun: false, applyOnly: false, force: false, replace: false }) },
     { icon: 'refresh', label: 'Refresh', onClick: () => doRefresh(app, false) },
     { icon: 'refresh', label: 'Hard refresh', onClick: () => doRefresh(app, true) },
     { icon: 'delete', label: 'Delete', danger: true, onClick: () => setConfirmDel({ app, cascade: true }) },
@@ -259,7 +259,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
   // ---------------------------------------------------------------- render
   const tabs = [
     { key: 'dashboard', label: 'Dashboard', icon: 'overview' },
-    { key: 'applications', label: 'Applications', icon: 'argocd', count: apps.length },
+    { key: 'applications', label: 'Applications', icon: 'deployment', count: apps.length },
     { key: 'view', label: 'View', icon: 'topology' },
     { key: 'appsets', label: 'Application Sets', icon: 'box', count: appSets.length },
     { key: 'projects', label: 'Projects', icon: 'accessControl', count: projects.length },
@@ -307,7 +307,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
                     {apps.length > 0 && (
                       <div className="argo-card-actions" style={{ display: 'flex', gap: 8, marginTop: 14 }}>
                         <button className="bulk-btn" disabled={busy} onClick={() => openBulk('sync', apps)}>
-                          <Icon name="argocd" size={14} /> Sync
+                          <Icon name="rocket" size={14} /> Sync
                         </button>
                         <button className="bulk-btn" disabled={busy} onClick={() => openBulk('refresh', apps)}>
                           <Icon name="refresh" size={14} /> Refresh
@@ -512,7 +512,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
                         <tr key={i} className="resource-table-row">
                           <td><a className="xlink" href={r.url.startsWith('http') ? r.url : `https://${r.url}`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{r.url}</a></td>
                           <td><span className="argo-badge muted">{r.type}</span></td>
-                          <td>{r.appCount || (r.source === 'secret' ? '—' : 0)}</td>
+                          <td>{r.appCount || (r.source === 'secret' ? '-' : 0)}</td>
                           <td className="drawer-dim">{r.source === 'secret' ? 'configured' : 'from applications'}</td>
                         </tr>
                       ))}
@@ -546,7 +546,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
       {tab === 'applications' && selRows.size > 0 && (
         <div className="bulk-bar">
           <span className="bulk-count">{selRows.size} selected</span>
-          <button className="bulk-btn" onClick={() => openBulk('sync', selectedApps(), true)}><Icon name="argocd" size={14} /> Sync</button>
+          <button className="bulk-btn" onClick={() => openBulk('sync', selectedApps(), true)}><Icon name="rocket" size={14} /> Sync</button>
           <button className="bulk-btn" onClick={() => openBulk('refresh', selectedApps(), true)}><Icon name="refresh" size={14} /> Refresh</button>
           <button className="bulk-btn ghost" onClick={() => setSelRows(new Set())} title="Clear selection"><Icon name="close" size={14} /></button>
         </div>
@@ -566,7 +566,7 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
             <div className="drawer-actions">
               <button className="drawer-action-btn" title={`Summarize (${askLabel()})`} onClick={() => summarize(selected)}><Icon name="sparkles" size={16} /></button>
               <button className="drawer-action-btn" title="Refresh" disabled={busy} onClick={() => doRefresh(selected)}><Icon name="refresh" size={16} /></button>
-              <button className="drawer-action-btn argo-sync" title="Sync" disabled={busy} onClick={() => setSyncDialog({ app: selected, prune: false, dryRun: false, applyOnly: false, force: false, replace: false })}><Icon name="argocd" size={16} /></button>
+              <button className="drawer-action-btn argo-sync" title="Sync" disabled={busy} onClick={() => setSyncDialog({ app: selected, prune: false, dryRun: false, applyOnly: false, force: false, replace: false })}><Icon name="rocket" size={16} /></button>
               <button className="drawer-action-btn danger" title="Delete" disabled={busy} onClick={() => setConfirmDel({ app: selected, cascade: true })}><Icon name="delete" size={16} /></button>
               <button className="drawer-action-btn" title="Close" onClick={() => setSelected(null)}><Icon name="close" size={17} /></button>
             </div>
@@ -599,13 +599,13 @@ export default function ArgoCD({ refreshSignal = 0, view, onViewChange }) {
       {syncDialog && (
         <div className="action-modal-backdrop" onClick={() => !busy && setSyncDialog(null)}>
           <div className="action-modal argo-sync-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="action-modal-title"><Icon name="argocd" size={16} /> Sync {syncDialog.app.name}</h3>
+            <h3 className="action-modal-title"><Icon name="rocket" size={16} /> Sync {syncDialog.app.name}</h3>
             {syncDialog.confirmStep === 2 ? (
               <p className="action-modal-body">
-                <b>Confirm sync</b> — apply the target Git state to <b>{syncDialog.app.name}</b>
+                <b>Confirm sync:</b> apply the target Git state to <b>{syncDialog.app.name}</b>
                 {syncDialog.revision ? <> at revision <b>{syncDialog.revision}</b></> : null}
                 {syncDialog.prune ? <>, and <b>prune</b> resources no longer in Git</> : null}
-                {syncDialog.dryRun ? ' (dry run — nothing is applied)' : ''}?
+                {syncDialog.dryRun ? ' (dry run, nothing is applied)' : ''}?
               </p>
             ) : (
               <>
@@ -834,7 +834,7 @@ function SummaryTab({ detail, attentionResources }) {
             {detail.syncPolicy.automated.prune && <span className="argo-badge muted">prune</span>}
             {detail.syncPolicy.automated.selfHeal && <span className="argo-badge muted">self-heal</span>}
           </div>
-        ) : <div className="argo-msg">Manual — syncs are triggered by hand.</div>}
+        ) : <div className="argo-msg">Manual: syncs are triggered by hand.</div>}
         {detail.syncPolicy?.syncOptions?.length > 0 && (
           <div className="argo-status-row" style={{ marginTop: 8 }}>
             {detail.syncPolicy.syncOptions.map((o, i) => <span key={i} className="argo-badge muted">{o}</span>)}

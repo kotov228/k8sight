@@ -13,6 +13,7 @@ import {
 const SECTIONS = [
   { key: 'general', label: 'General', icon: 'configuration' },
   { key: 'kubernetes', label: 'Kubernetes', icon: 'cluster' },
+  { key: 'production', label: 'Production clusters', icon: 'shield' },
   { key: 'integrations', label: 'Cloud Integrations', icon: 'hexagon' },
   { key: 'external-tools', label: 'External Tools', icon: 'sparkles' },
   { key: 'assistant', label: 'AI Assistant', icon: 'send' },
@@ -20,7 +21,7 @@ const SECTIONS = [
   { key: 'about', label: 'About', icon: 'details' },
 ];
 
-export default function Preferences({ configStatus, theme, onSetTheme, onChangeConfig, onAddAzure, onAddAws, onAddGke, initialSection, onClose }) {
+export default function Preferences({ configStatus, theme, onSetTheme, onChangeConfig, onAddAzure, onAddAws, onAddGke, initialSection, prodMark, onClose }) {
   const [section, setSection] = useState(initialSection || 'general');
   useEffect(() => { if (initialSection) setSection(initialSection); }, [initialSection]);
 
@@ -50,6 +51,7 @@ export default function Preferences({ configStatus, theme, onSetTheme, onChangeC
         )}
         {section === 'general' && <GeneralSection theme={theme} onSetTheme={onSetTheme} />}
         {section === 'kubernetes' && <KubernetesSection configStatus={configStatus} onChangeConfig={onChangeConfig} />}
+        {section === 'production' && <ProductionSection prodMark={prodMark} configStatus={configStatus} />}
         {section === 'integrations' && <IntegrationsSection onAddAzure={onAddAzure} onAddAws={onAddAws} onAddGke={onAddGke} />}
         {section === 'external-tools' && <ExternalToolsSection />}
         {section === 'assistant' && <AssistantSection />}
@@ -123,10 +125,70 @@ function KubernetesSection({ configStatus, onChangeConfig }) {
         </div>
       </Field>
       <Field label="Current context" hint="The cluster that new requests target.">
-        <code className="prefs-code">{configStatus?.currentContext || '—'}</code>
+        <code className="prefs-code">{configStatus?.currentContext || '-'}</code>
       </Field>
       <Field label="Available contexts">
         <span className="prefs-muted">{(configStatus?.contexts || []).length} context(s) across {(configStatus?.clusters || []).length} cluster(s)</span>
+      </Field>
+    </div>
+  );
+}
+
+/* ── Production clusters ─────────────────────────────────────────── */
+const PROD_COLORS = ['#ff3b30', '#ff9f0a', '#ffd60a', '#ff2d55', '#af52de', '#32ade6'];
+const PROD_THICKNESS = [{ k: 2, label: 'Thin' }, { k: 4, label: 'Medium' }, { k: 8, label: 'Thick' }];
+
+function ProductionSection({ prodMark, configStatus }) {
+  if (!prodMark) return null;
+  const { prefs, setPrefs, marks } = prodMark;
+  const Toggle = ({ on, onChange }) => (
+    <div className="prefs-seg">
+      {[{ k: true, label: 'On' }, { k: false, label: 'Off' }].map((o) => (
+        <button key={String(o.k)} className={`prefs-seg-btn ${on === o.k ? 'active' : ''}`} onClick={() => onChange(o.k)}>{o.label}</button>
+      ))}
+    </div>
+  );
+  const marked = Object.entries(marks || {}).filter(([, v]) => v).map(([k]) => k);
+  return (
+    <div className="prefs-section">
+      <h2 className="prefs-h2">Production clusters</h2>
+      <p className="prefs-lead">Make it obvious when the active context is a production cluster, so you are less likely to change the wrong environment. A context whose name contains <code>prod</code>, <code>production</code> or <code>prd</code> as a separate word is detected automatically; mark or unmark any context from the context switcher.</p>
+
+      <Field label="Window edge" hint="A coloured edge around the whole window while a production cluster is open.">
+        <div className="prefs-inline" style={{ gap: 12 }}>
+          <Toggle on={prefs.edge} onChange={(v) => setPrefs({ edge: v })} />
+          <div className="prefs-seg">
+            {PROD_THICKNESS.map((t) => (
+              <button key={t.k} className={`prefs-seg-btn ${prefs.edgeThickness === t.k ? 'active' : ''}`} disabled={!prefs.edge} onClick={() => setPrefs({ edgeThickness: t.k })}>{t.label}</button>
+            ))}
+          </div>
+        </div>
+      </Field>
+
+      <Field label="Header badge" hint="A PRODUCTION label next to the context in the sidebar.">
+        <Toggle on={prefs.badge} onChange={(v) => setPrefs({ badge: v })} />
+      </Field>
+
+      <Field label="Colour" hint="Used for the edge and the badge.">
+        <div className="prefs-inline" style={{ gap: 8 }}>
+          {PROD_COLORS.map((c) => (
+            <button
+              key={c}
+              className={`prod-swatch ${prefs.color === c ? 'active' : ''}`}
+              style={{ background: c }}
+              title={c}
+              aria-label={`Use ${c}`}
+              onClick={() => setPrefs({ color: c })}
+            />
+          ))}
+          <input type="color" className="prod-swatch-custom" value={prefs.color} title="Custom colour" onChange={(e) => setPrefs({ color: e.target.value })} />
+        </div>
+      </Field>
+
+      <Field label="Marked contexts" hint="Contexts you marked by hand. Automatic name matches are not listed here.">
+        {marked.length
+          ? <div className="prod-marked-list">{marked.map((m) => <code key={m} className="prefs-code">{m}</code>)}</div>
+          : <span className="prefs-muted">None yet. Mark a context from the context switcher (the shield icon).</span>}
       </Field>
     </div>
   );
@@ -137,7 +199,7 @@ function IntegrationsSection({ onAddAzure, onAddAws, onAddGke }) {
   return (
     <div className="prefs-section">
       <h2 className="prefs-h2">Cloud Integrations</h2>
-      <p className="prefs-lead">Add clusters straight from your cloud account — no CLI required. We handle login and write the kubeconfig for you.</p>
+      <p className="prefs-lead">Add clusters straight from your cloud account, no CLI required. We handle login and write the kubeconfig for you.</p>
       <div className="prefs-cards">
         <div className="prefs-int-card">
           <div className="prefs-int-head"><Icon name="azure" size={22} /> <span>Azure AKS</span></div>
@@ -146,12 +208,12 @@ function IntegrationsSection({ onAddAzure, onAddAws, onAddGke }) {
         </div>
         <div className="prefs-int-card">
           <div className="prefs-int-head"><Icon name="aws" size={22} /> <span>AWS EKS</span></div>
-          <p className="prefs-muted">SSO, access keys or IAM role — discover and import EKS clusters.</p>
+          <p className="prefs-muted">Discover and import EKS clusters with SSO, access keys or an IAM role.</p>
           <button className="prefs-btn primary" onClick={onAddAws}>Add AWS clusters</button>
         </div>
         <div className="prefs-int-card">
           <div className="prefs-int-head"><Icon name="gcp" size={22} /> <span>Google GKE</span></div>
-          <p className="prefs-muted">Browser sign-in or a service-account key — no <code>gcloud</code> required.</p>
+          <p className="prefs-muted">Browser sign-in or a service-account key, no <code>gcloud</code> required.</p>
           <button className="prefs-btn primary" onClick={onAddGke}>Add GKE clusters</button>
         </div>
       </div>
@@ -199,7 +261,7 @@ function ExternalToolsSection() {
     <div className="prefs-section">
       <h2 className="prefs-h2">External Tools</h2>
       <div className="prefs-ai-label">AI TOOL <span className="prefs-premium">FREE</span></div>
-      <p className="prefs-lead">The AI tool the app launches for e.g. <strong>"Ask AI"</strong>. Bring your own agent — it runs in a terminal with your cluster context loaded, no API key.</p>
+      <p className="prefs-lead">The AI tool the app launches for e.g. <strong>"Ask AI"</strong>. Bring your own agent. It runs in a terminal with your cluster context loaded, no API key.</p>
 
       <div className="prefs-detect-row">
         <span className="prefs-muted">{detected} of {agents.length} detected on your system</span>
@@ -407,7 +469,7 @@ function McpSection() {
         <strong> currently selected cluster</strong>. The server runs while the app is open.
       </p>
 
-      <CopyField label="HTTP endpoint" hint="Streamable HTTP transport — recommended." value={endpoint} />
+      <CopyField label="HTTP endpoint" hint="Streamable HTTP transport (recommended)." value={endpoint} />
 
       <CopyField label="Add to Claude Code" hint="Run this in your terminal." value={claudeCmd} />
 
@@ -423,7 +485,7 @@ function McpSection() {
         </div>
       </Field>
 
-      <Field label="Write access" hint="Read-only is safest. Enabling lets agents apply, delete, scale and sync — mutating your cluster.">
+      <Field label="Write access" hint="Read-only is safest. Enabling lets agents apply, delete, scale and sync, which changes your cluster.">
         {info == null ? <span className="prefs-muted">…</span> : (
           <div className="prefs-stack">
             <div className="prefs-seg">
@@ -433,7 +495,7 @@ function McpSection() {
             <div className={`prefs-status ${info.allowWrite ? 'warn' : 'ok'}`}>
               <span className="prefs-status-dot" />
               {info.allowWrite
-                ? 'Write tools exposed — reconnect your agent to pick them up.'
+                ? 'Write tools are on. Reconnect your agent to pick them up.'
                 : 'Only read tools are exposed.'}
             </div>
           </div>
@@ -458,7 +520,7 @@ function AboutSection({ configStatus }) {
     <div className="prefs-section">
       <h2 className="prefs-h2">About</h2>
       <Field label="k8sight">{version ? <span className="prefs-muted">Version {version}</span> : null}</Field>
-      <p className="prefs-lead">A native Kubernetes management app — cluster overview, resources, topology, ArgoCD, one-click AKS/EKS, terminals and bring-your-own AI agents.</p>
+      <p className="prefs-lead">A native Kubernetes management app: cluster overview, resources, topology, ArgoCD, one-click AKS/EKS, terminals and bring-your-own AI agents.</p>
     </div>
   );
 }
